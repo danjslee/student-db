@@ -1,0 +1,20 @@
+import { useState } from "react";
+import TabBar from "./TabBar";
+import StudentsGrid from "./StudentsGrid";
+import ProductsGrid from "./ProductsGrid";
+import EnrollmentsGrid from "./EnrollmentsGrid";
+
+const SUB_TABS = ["Students", "Products", "Enrollments"];
+
+export default function DataTab() {
+  const [activeTab, setActiveTab] = useState("Students");
+
+  return (
+    <>
+      <TabBar tabs={SUB_TABS} active={activeTab} onSelect={setActiveTab} />
+      {activeTab === "Students" && <StudentsGrid />}
+      {activeTab === "Products" && <ProductsGrid />}
+      {activeTab === "Enrollments" && <EnrollmentsGrid />}
+    </>
+  );
+}

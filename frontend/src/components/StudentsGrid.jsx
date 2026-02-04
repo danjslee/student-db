@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import { themeAlpine } from "ag-grid-community";
+import { darkTheme } from "../gridTheme";
 import { fetchStudents, updateStudent } from "../api";
 
 const PAGE_SIZE = 200;
@@ -54,9 +54,38 @@ export default function StudentsGrid() {
       { field: "student_number", headerName: "Student #", editable: false },
       { field: "first_name", headerName: "First Name", editable: true },
       { field: "last_name", headerName: "Last Name", editable: true },
+      { field: "preferred_name", headerName: "Preferred Name", editable: true },
       { field: "email", headerName: "Email", editable: true },
+      { field: "alternative_email", headerName: "Alt Email", editable: true },
       { field: "country", headerName: "Country", editable: true },
+      { field: "timezone", headerName: "Timezone", editable: true },
       { field: "closest_city", headerName: "City", editable: true },
+      {
+        field: "dob",
+        headerName: "DOB",
+        editable: false,
+        valueFormatter: (params) => {
+          if (!params.value) return "";
+          return new Date(params.value).toLocaleDateString();
+        },
+      },
+      { field: "gender", headerName: "Gender", editable: true },
+      { field: "learn_about_course", headerName: "How They Heard", editable: true },
+      { field: "consent_images", headerName: "Consent Images", editable: false },
+      { field: "consent_photo_on_site", headerName: "Consent Photo", editable: false },
+      { field: "what_made_you_join", headerName: "Why Join", editable: true },
+      { field: "get_from", headerName: "Get From", editable: true },
+      { field: "here_for", headerName: "Here For", editable: true },
+      { field: "claude_confidence_level", headerName: "Confidence Level", editable: false },
+      {
+        field: "onboarding_date",
+        headerName: "Onboarding Date",
+        editable: false,
+        valueFormatter: (params) => {
+          if (!params.value) return "";
+          return new Date(params.value).toLocaleDateString();
+        },
+      },
       { field: "enrollment_count", headerName: "Enrollment Count", editable: false },
     ],
     []
@@ -95,7 +124,7 @@ export default function StudentsGrid() {
       </div>
       <div className="grid-wrapper">
         <AgGridReact
-          theme={themeAlpine}
+          theme={darkTheme}
           rowData={rowData}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}

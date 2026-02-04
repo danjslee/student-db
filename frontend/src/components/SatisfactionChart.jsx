@@ -8,14 +8,14 @@ import {
   CartesianGrid,
 } from "recharts";
 
-export default function CountryChart({ data }) {
+export default function SatisfactionChart({ data }) {
   if (!data || data.length === 0) {
-    return <p className="chart-empty">No country data available.</p>;
+    return <p className="chart-empty">No satisfaction data available.</p>;
   }
 
   return (
     <div className="chart-card">
-      <h3>Students by Country</h3>
+      <h3>Course Satisfaction</h3>
       <ResponsiveContainer width="100%" height={300}>
         <BarChart data={data} margin={{ top: 5, right: 20, bottom: 60, left: 10 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#292524" />
@@ -39,7 +39,7 @@ export default function CountryChart({ data }) {
             labelStyle={{ color: "#d6d3d1" }}
             itemStyle={{ color: "#fff" }}
           />
-          <Bar dataKey="count" fill="#0284c7" radius={[4, 4, 0, 0]} />
+          <Bar dataKey="count" fill="#f59e0b" radius={[4, 4, 0, 0]} />
         </BarChart>
       </ResponsiveContainer>
     </div>

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { AgGridReact } from "ag-grid-react";
-import { themeAlpine } from "ag-grid-community";
+import { darkTheme } from "../gridTheme";
 import { fetchProducts, updateProduct } from "../api";
 
 export default function ProductsGrid() {
@@ -44,7 +44,7 @@ export default function ProductsGrid() {
     <div className="grid-container">
       <div className="grid-wrapper">
         <AgGridReact
-          theme={themeAlpine}
+          theme={darkTheme}
           rowData={rowData}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}

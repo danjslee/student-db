@@ -12,6 +12,7 @@ Claude to dump JSON files, then load them with import_from_json().
 """
 from __future__ import annotations
 
+import csv
 import json
 import os
 import sys
@@ -55,7 +56,10 @@ def parse_datetime(value: str | None) -> datetime | None:
         # Handle milliseconds
         if "." in cleaned:
             return datetime.strptime(cleaned, "%Y-%m-%dT%H:%M:%S.%f").replace(tzinfo=timezone.utc)
-        return datetime.strptime(cleaned, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        if "T" in cleaned:
+            return datetime.strptime(cleaned, "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+        # CSV format: "2026-01-24 20:58:10"
+        return datetime.strptime(cleaned, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
 
@@ -207,6 +211,83 @@ def fetch_all_via_api():
         print(f"Exported {len(all_records)} records to {filepath}")
 
 
+def import_survey_csv(db: Session):
+    """Import survey responses from CSV, updating enrollment rows directly via email match."""
+    csv_path = os.path.join(DATA_DIR, "survey_responses.csv")
+    if not os.path.exists(csv_path):
+        print(f"Missing {csv_path}. Skipping survey import.")
+        return
+
+    # Build email → enrollment lookup for "Claude Code for Beginners" (product_id=1)
+    # Check both primary email and alternative_email
+    email_to_enrollment: dict[str, Enrollment] = {}
+    enrollments = (
+        db.query(Enrollment)
+        .join(Student, Enrollment.student_id == Student.id)
+        .filter(Enrollment.product_id == 1)
+        .all()
+    )
+    for enr in enrollments:
+        student = enr.student
+        if student.email:
+            email_to_enrollment[student.email.strip().lower()] = enr
+        if student.alternative_email:
+            email_to_enrollment[student.alternative_email.strip().lower()] = enr
+
+    with open(csv_path, newline="", encoding="utf-8") as f:
+        reader = csv.reader(f)
+        headers = next(reader)  # skip header row
+
+        updated = 0
+        unmatched = 0
+        for row in reader:
+            if len(row) < 20:
+                continue  # skip malformed rows
+
+            response_hash = row[0].strip()
+            if not response_hash:
+                continue
+
+            email = row[1].strip().lower()
+            enrollment = email_to_enrollment.get(email)
+
+            if not enrollment:
+                unmatched += 1
+                continue
+
+            # Parse integer fields safely
+            def safe_int(val):
+                try:
+                    return int(val.strip()) if val and val.strip() else None
+                except (ValueError, AttributeError):
+                    return None
+
+            enrollment.response_hash = response_hash
+            enrollment.biggest_win = row[2].strip() or None
+            enrollment.three_things_learned = row[3].strip() or None
+            enrollment.confidence_after = safe_int(row[4])
+            enrollment.satisfaction = row[5].strip() or None
+            enrollment.recommend_score = safe_int(row[6])
+            enrollment.testimonial = row[7].strip() or None
+            enrollment.improvement_suggestion = row[8].strip() or None
+            enrollment.interest_longer_program = row[9].strip() or None
+            enrollment.followup_topics = row[10].strip() or None
+            enrollment.beginner_friendly_rating = row[11].strip() or None
+            enrollment.expected_learning_not_covered = row[12].strip() or None
+            enrollment.anything_else = row[13].strip() or None
+            enrollment.survey_response_type = row[14].strip() or None
+            enrollment.survey_start_date = parse_datetime(row[15].strip() or None)
+            enrollment.survey_stage_date = parse_datetime(row[16].strip() or None)
+            enrollment.survey_submit_date = parse_datetime(row[17].strip() or None)
+            enrollment.survey_network_id = row[18].strip() or None
+            enrollment.survey_tags = row[19].strip() or None
+            # Column 20 is "Ending" — static thank-you text, discarded
+            updated += 1
+
+    db.commit()
+    print(f"Updated {updated} enrollments with survey data (skipped {unmatched} unmatched emails)")
+
+
 def main():
     if len(sys.argv) > 1 and sys.argv[1] == "fetch":
         fetch_all_via_api()
@@ -222,6 +303,11 @@ def main():
             print("Database already has data. Drop student.db and re-run to reseed.")
             return
         import_from_json(db)
+
+        # Import survey data into enrollments if not already present
+        has_survey = db.query(Enrollment).filter(Enrollment.response_hash.isnot(None)).count() > 0
+        if not has_survey:
+            import_survey_csv(db)
     finally:
         db.close()
 

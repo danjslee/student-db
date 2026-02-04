@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import json
 import os
-import re
 import sqlite3
 
+import anthropic
 from fastapi import APIRouter, HTTPException
 
 from app.database import DB_PATH
@@ -51,80 +52,70 @@ CREATE TABLE enrollments (
                   -- "Paying Customer (Referral)", "Scholarship (paid)",
                   -- "Scholarship (free)", "Free place", "Refunded", "Deferred"
     student_id INTEGER REFERENCES students(id),
-    product_id INTEGER REFERENCES products(id)
+    product_id INTEGER REFERENCES products(id),
+    -- Survey fields (populated from post-course survey CSV, nullable)
+    response_hash TEXT,
+    biggest_win TEXT,
+    three_things_learned TEXT,
+    confidence_after INTEGER,              -- 1-10 post-course confidence
+    satisfaction TEXT,                      -- "Extremely satisfied", "Very satisfied", "Somewhat satisfied"
+    recommend_score INTEGER,               -- 1-10 NPS score
+    testimonial TEXT,
+    improvement_suggestion TEXT,
+    interest_longer_program TEXT,           -- "Definitely yes", "Probably yes", "Maybe"
+    followup_topics TEXT,
+    beginner_friendly_rating TEXT,          -- "Excellent", "Good", "Fair"
+    expected_learning_not_covered TEXT,
+    anything_else TEXT,
+    survey_response_type TEXT,
+    survey_start_date DATETIME,
+    survey_stage_date DATETIME,
+    survey_submit_date DATETIME,
+    survey_network_id TEXT,
+    survey_tags TEXT
 );
 """.strip()
 
+SYSTEM_PROMPT = f"""You are an expert data analyst assistant for a student enrollment database.
+You help users understand their student, enrollment, and course survey data.
 
-@router.post("/", response_model=ChatResponse)
-async def chat(request: ChatRequest):
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key or api_key == "your-api-key-here":
-        raise HTTPException(
-            500,
-            "ANTHROPIC_API_KEY not configured. Set it in backend/.env",
-        )
-
-    try:
-        import anthropic
-    except ImportError:
-        raise HTTPException(500, "anthropic package not installed")
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    system_prompt = f"""You are a helpful data analyst assistant. You have access to a SQLite database with the following schema:
-
+DATABASE SCHEMA:
 {SCHEMA_DESCRIPTION}
 
-When the user asks a question about the data, respond with a JSON object containing:
-- "sql": a single SELECT query that answers the question (READ-ONLY, no INSERT/UPDATE/DELETE)
-- "explanation": a brief natural language explanation of what the query does
-
-IMPORTANT RULES:
-- Only generate SELECT statements. Never generate INSERT, UPDATE, DELETE, DROP, ALTER, or any DDL/DML.
-- Always return valid JSON with "sql" and "explanation" keys.
-- Use proper SQL syntax for SQLite.
-- If the question cannot be answered with a SQL query, set "sql" to null and explain why in "explanation".
+INSTRUCTIONS:
+- When the user asks a data question, use the run_sql_query tool to query the database.
+  You may call it zero, one, or multiple times per turn as needed.
+- After receiving query results, write a clear, insightful analysis in markdown.
+- Use markdown formatting: headers, bold, bullet lists, numbered lists, and tables where helpful.
+- Be conversational and helpful. If the user asks a non-data question, respond normally without querying.
+- If a query returns an error, explain the issue and try a corrected query.
+- Only generate SELECT statements. Never attempt INSERT, UPDATE, DELETE, DROP, or ALTER.
+- When presenting numbers, add context (percentages, comparisons, trends) to make the data meaningful.
+- Keep responses focused and concise but thorough.
 """
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        system=system_prompt,
-        messages=[{"role": "user", "content": request.message}],
-    )
+TOOLS = [
+    {
+        "name": "run_sql_query",
+        "description": "Execute a read-only SQL SELECT query against the student database. Returns rows as a list of dictionaries, or an error message if the query fails.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sql": {
+                    "type": "string",
+                    "description": "A SQL SELECT query to execute against the SQLite database",
+                }
+            },
+            "required": ["sql"],
+        },
+    }
+]
 
-    response_text = message.content[0].text
 
-    # Parse the JSON from Claude's response
-    import json
-
-    # Try to extract JSON from the response (it might be wrapped in markdown code blocks)
-    json_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", response_text, re.DOTALL)
-    if json_match:
-        parsed = json.loads(json_match.group(1))
-    else:
-        try:
-            parsed = json.loads(response_text)
-        except json.JSONDecodeError:
-            return ChatResponse(answer=response_text, sql=None, data=None)
-
-    sql = parsed.get("sql")
-    explanation = parsed.get("explanation", "")
-
-    if not sql:
-        return ChatResponse(answer=explanation, sql=None, data=None)
-
-    # Safety check: only allow SELECT
+def _execute_query(sql: str) -> str:
     sql_stripped = sql.strip().upper()
     if not sql_stripped.startswith("SELECT"):
-        return ChatResponse(
-            answer="I can only run read-only SELECT queries.",
-            sql=sql,
-            data=None,
-        )
-
-    # Execute the query (read-only connection)
+        return json.dumps({"error": "Only SELECT queries are allowed."})
     try:
         conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
         conn.row_factory = sqlite3.Row
@@ -132,19 +123,56 @@ IMPORTANT RULES:
         rows = [dict(row) for row in cursor.fetchall()]
         conn.close()
     except Exception as e:
-        return ChatResponse(
-            answer=f"Query failed: {e}",
-            sql=sql,
-            data=None,
+        return json.dumps({"error": str(e)})
+    if len(rows) > 100:
+        return json.dumps({"rows": rows[:100], "total_count": len(rows),
+            "note": f"Showing first 100 of {len(rows)} rows."})
+    return json.dumps({"rows": rows, "total_count": len(rows)})
+
+
+@router.post("/", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    if not request.messages:
+        raise HTTPException(400, "Messages array cannot be empty")
+    if request.messages[-1].role != "user":
+        raise HTTPException(400, "Last message must be from user")
+
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key or api_key == "your-api-key-here":
+        raise HTTPException(500, "ANTHROPIC_API_KEY not configured.")
+
+    client = anthropic.Anthropic(api_key=api_key)
+    messages = [{"role": m.role, "content": m.content} for m in request.messages]
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=4096,
+        system=SYSTEM_PROMPT,
+        tools=TOOLS,
+        messages=messages,
+    )
+
+    rounds = 0
+    while response.stop_reason == "tool_use" and rounds < 10:
+        rounds += 1
+        tool_results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                result_str = _execute_query(block.input["sql"])
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result_str,
+                })
+        messages.append({"role": "assistant", "content": response.content})
+        messages.append({"role": "user", "content": tool_results})
+        response = client.messages.create(
+            model="claude-sonnet-4-20250514",
+            max_tokens=4096,
+            system=SYSTEM_PROMPT,
+            tools=TOOLS,
+            messages=messages,
         )
 
-    # Generate a natural language summary
-    if len(rows) == 1 and len(rows[0]) == 1:
-        value = list(rows[0].values())[0]
-        answer = f"{explanation}\n\nResult: **{value}**"
-    elif len(rows) <= 20:
-        answer = f"{explanation}\n\nFound {len(rows)} result(s)."
-    else:
-        answer = f"{explanation}\n\nFound {len(rows)} results (showing data in table)."
-
-    return ChatResponse(answer=answer, sql=sql, data=rows)
+    answer_parts = [block.text for block in response.content if hasattr(block, "text")]
+    return ChatResponse(answer="\n\n".join(answer_parts))

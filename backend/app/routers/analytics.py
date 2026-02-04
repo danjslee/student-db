@@ -102,3 +102,42 @@ def referral_sources(db: Session = Depends(get_db)):
         .all()
     )
     return [CountItem(label=source, count=count) for source, count in rows]
+
+
+@router.get("/satisfaction-distribution", response_model=List[CountItem])
+def satisfaction_distribution(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Enrollment.satisfaction, func.count(Enrollment.id))
+        .filter(
+            Enrollment.satisfaction.isnot(None),
+            Enrollment.satisfaction != "",
+        )
+        .group_by(Enrollment.satisfaction)
+        .order_by(func.count(Enrollment.id).desc())
+        .all()
+    )
+    return [CountItem(label=level, count=count) for level, count in rows]
+
+
+@router.get("/nps-distribution", response_model=List[CountItem])
+def nps_distribution(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Enrollment.recommend_score, func.count(Enrollment.id))
+        .filter(Enrollment.recommend_score.isnot(None))
+        .group_by(Enrollment.recommend_score)
+        .order_by(Enrollment.recommend_score)
+        .all()
+    )
+    return [CountItem(label=str(int(score)), count=count) for score, count in rows]
+
+
+@router.get("/confidence-after-distribution", response_model=List[CountItem])
+def confidence_after_distribution(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Enrollment.confidence_after, func.count(Enrollment.id))
+        .filter(Enrollment.confidence_after.isnot(None))
+        .group_by(Enrollment.confidence_after)
+        .order_by(Enrollment.confidence_after)
+        .all()
+    )
+    return [CountItem(label=str(int(level)), count=count) for level, count in rows]

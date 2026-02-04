@@ -1,13 +1,23 @@
 import { useState, useEffect } from "react";
-import { fetchProducts, fetchStudentsByCountry, fetchStudentsByCity } from "../api";
+import {
+  fetchProducts,
+  fetchStudentsByCountry,
+  fetchStudentsByCity,
+  fetchSatisfactionDistribution,
+  fetchNpsDistribution,
+} from "../api";
 import CountryChart from "./CountryChart";
 import CityChart from "./CityChart";
+import SatisfactionChart from "./SatisfactionChart";
+import NpsChart from "./NpsChart";
 
 export default function InsightsTab() {
   const [products, setProducts] = useState([]);
   const [selectedProduct, setSelectedProduct] = useState("");
   const [countryData, setCountryData] = useState([]);
   const [cityData, setCityData] = useState([]);
+  const [satisfactionData, setSatisfactionData] = useState([]);
+  const [npsData, setNpsData] = useState([]);
   const [loading, setLoading] = useState(false);
 
   useEffect(() => {
@@ -22,10 +32,14 @@ export default function InsightsTab() {
     Promise.all([
       fetchStudentsByCountry(productId),
       fetchStudentsByCity(productId),
+      fetchSatisfactionDistribution(),
+      fetchNpsDistribution(),
     ])
-      .then(([countries, cities]) => {
+      .then(([countries, cities, satisfaction, nps]) => {
         setCountryData(countries);
         setCityData(cities);
+        setSatisfactionData(satisfaction);
+        setNpsData(nps);
       })
       .catch((err) => console.error("Failed to load chart data:", err))
       .finally(() => setLoading(false));
@@ -54,6 +68,8 @@ export default function InsightsTab() {
         <div className="charts-grid">
           <CountryChart data={countryData} />
           <CityChart data={cityData} />
+          <SatisfactionChart data={satisfactionData} />
+          <NpsChart data={npsData} />
         </div>
       )}
     </div>

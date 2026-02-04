@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { AgGridReact } from "ag-grid-react";
-import { themeAlpine } from "ag-grid-community";
+import { darkTheme } from "../gridTheme";
 import { fetchEnrollments, updateEnrollment } from "../api";
 
 const PAGE_SIZE = 200;
@@ -57,6 +57,28 @@ export default function EnrollmentsGrid() {
         editable: false,
         valueGetter: (params) => params.data.product?.product_name || "",
       },
+      // Survey columns
+      { field: "biggest_win", headerName: "Biggest Win", editable: false },
+      { field: "three_things_learned", headerName: "Three Things Learned", editable: false },
+      { field: "confidence_after", headerName: "Confidence (Post)", editable: false },
+      { field: "satisfaction", headerName: "Satisfaction", editable: false },
+      { field: "recommend_score", headerName: "NPS Score", editable: false },
+      { field: "testimonial", headerName: "Testimonial", editable: false },
+      { field: "improvement_suggestion", headerName: "Improvement Suggestion", editable: false },
+      { field: "interest_longer_program", headerName: "Interest in Longer Program", editable: false },
+      { field: "followup_topics", headerName: "Follow-up Topics", editable: false },
+      { field: "beginner_friendly_rating", headerName: "Beginner Rating", editable: false },
+      { field: "expected_learning_not_covered", headerName: "Expected Not Covered", editable: false },
+      { field: "anything_else", headerName: "Anything Else", editable: false },
+      {
+        field: "survey_submit_date",
+        headerName: "Survey Submit Date",
+        editable: false,
+        valueFormatter: (params) => {
+          if (!params.value) return "";
+          return new Date(params.value).toLocaleDateString();
+        },
+      },
     ],
     []
   );
@@ -85,7 +107,7 @@ export default function EnrollmentsGrid() {
     <div className="grid-container">
       <div className="grid-wrapper">
         <AgGridReact
-          theme={themeAlpine}
+          theme={darkTheme}
           rowData={rowData}
           columnDefs={columnDefs}
           defaultColDef={defaultColDef}

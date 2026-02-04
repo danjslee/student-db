@@ -113,8 +113,21 @@ class StudentRead(StudentBase):
 
 
 class StudentList(StudentBrief):
+    preferred_name: Optional[str] = None
+    alternative_email: Optional[str] = None
     country: Optional[str] = None
+    timezone: Optional[str] = None
     closest_city: Optional[str] = None
+    dob: Optional[date] = None
+    gender: Optional[str] = None
+    learn_about_course: Optional[str] = None
+    consent_images: Optional[bool] = None
+    consent_photo_on_site: Optional[bool] = None
+    what_made_you_join: Optional[str] = None
+    get_from: Optional[str] = None
+    here_for: Optional[str] = None
+    claude_confidence_level: Optional[float] = None
+    onboarding_date: Optional[datetime] = None
     enrollment_count: int = 0
 
     model_config = {"from_attributes": True}
@@ -127,6 +140,26 @@ class EnrollmentBase(BaseModel):
     status: Optional[str] = None
     student_id: int
     product_id: int
+    # Survey fields
+    response_hash: Optional[str] = None
+    biggest_win: Optional[str] = None
+    three_things_learned: Optional[str] = None
+    confidence_after: Optional[int] = None
+    satisfaction: Optional[str] = None
+    recommend_score: Optional[int] = None
+    testimonial: Optional[str] = None
+    improvement_suggestion: Optional[str] = None
+    interest_longer_program: Optional[str] = None
+    followup_topics: Optional[str] = None
+    beginner_friendly_rating: Optional[str] = None
+    expected_learning_not_covered: Optional[str] = None
+    anything_else: Optional[str] = None
+    survey_response_type: Optional[str] = None
+    survey_start_date: Optional[datetime] = None
+    survey_stage_date: Optional[datetime] = None
+    survey_submit_date: Optional[datetime] = None
+    survey_network_id: Optional[str] = None
+    survey_tags: Optional[str] = None
 
 
 class EnrollmentCreate(EnrollmentBase):
@@ -137,6 +170,19 @@ class EnrollmentUpdate(BaseModel):
     status: Optional[str] = None
     student_id: Optional[int] = None
     product_id: Optional[int] = None
+    # Survey fields
+    biggest_win: Optional[str] = None
+    three_things_learned: Optional[str] = None
+    confidence_after: Optional[int] = None
+    satisfaction: Optional[str] = None
+    recommend_score: Optional[int] = None
+    testimonial: Optional[str] = None
+    improvement_suggestion: Optional[str] = None
+    interest_longer_program: Optional[str] = None
+    followup_topics: Optional[str] = None
+    beginner_friendly_rating: Optional[str] = None
+    expected_learning_not_covered: Optional[str] = None
+    anything_else: Optional[str] = None
 
 
 class EnrollmentRead(EnrollmentBase):
@@ -149,14 +195,15 @@ class EnrollmentRead(EnrollmentBase):
 
 # ---------- Chat ----------
 
-class ChatRequest(BaseModel):
-    message: str
+class ChatMessage(BaseModel):
+    role: str          # "user" or "assistant"
+    content: str
 
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
 
 class ChatResponse(BaseModel):
     answer: str
-    sql: Optional[str] = None
-    data: Optional[List[Dict]] = None
 
 
 # ---------- Analytics ----------
@@ -169,3 +216,5 @@ class CountItem(BaseModel):
 class TimelineItem(BaseModel):
     date: str
     count: int
+
+

@@ -102,13 +102,27 @@ export async function fetchStudentsByCity(productId) {
   return res.json();
 }
 
+// ── Analytics (survey) ──────────────────────────────────
+
+export async function fetchSatisfactionDistribution() {
+  const res = await fetch(`${BASE_URL}/analytics/satisfaction-distribution`);
+  if (!res.ok) throw new Error(`Failed to fetch satisfaction distribution: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchNpsDistribution() {
+  const res = await fetch(`${BASE_URL}/analytics/nps-distribution`);
+  if (!res.ok) throw new Error(`Failed to fetch NPS distribution: ${res.status}`);
+  return res.json();
+}
+
 // ── Chat ─────────────────────────────────────────────────
 
-export async function sendChatMessage(message) {
+export async function sendChatMessage(messages) {
   const res = await fetch(`${BASE_URL}/chat/`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify({ messages }),
   });
   if (!res.ok) throw new Error(`Chat request failed: ${res.status}`);
   return res.json();

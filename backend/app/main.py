@@ -1,11 +1,16 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import os
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
 
 from app.database import engine, Base
-from app.routers import students, products, enrollments, chat, analytics
+from app.routers import students, products, enrollments, chat, analytics, webhooks, admin
 
 # Create tables on startup
 Base.metadata.create_all(bind=engine)
@@ -27,8 +32,23 @@ app.include_router(products.router)
 app.include_router(enrollments.router)
 app.include_router(chat.router)
 app.include_router(analytics.router)
+app.include_router(webhooks.router)
+app.include_router(admin.router)
 
+# Serve the React frontend (built files)
+FRONTEND_DIR = Path(__file__).parent.parent / "frontend_dist"
 
-@app.get("/")
-def root():
-    return {"message": "Every Student Database API", "docs": "/docs"}
+if FRONTEND_DIR.is_dir():
+    app.mount("/assets", StaticFiles(directory=FRONTEND_DIR / "assets"), name="static-assets")
+
+    @app.get("/{full_path:path}")
+    async def serve_frontend(full_path: str):
+        """Serve the React SPA — any non-API route gets index.html."""
+        file_path = FRONTEND_DIR / full_path
+        if full_path and file_path.is_file():
+            return FileResponse(file_path)
+        return FileResponse(FRONTEND_DIR / "index.html")
+else:
+    @app.get("/")
+    def root():
+        return {"message": "Every Student Database API", "docs": "/docs"}

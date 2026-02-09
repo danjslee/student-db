@@ -13,6 +13,9 @@ class Product(Base):
     product_id = Column(String, unique=True, nullable=False)
     product_name = Column(String, nullable=False)
     kit_tag = Column(String, nullable=True)
+    stripe_price_id = Column(String, nullable=True)
+    typeform_form_id = Column(String, nullable=True)
+    typeform_field_map = Column(Text, nullable=True)
 
     enrollments = relationship("Enrollment", back_populates="product")
 

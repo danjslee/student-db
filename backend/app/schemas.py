@@ -9,6 +9,9 @@ class ProductBase(BaseModel):
     product_id: str
     product_name: str
     kit_tag: Optional[str] = None
+    stripe_price_id: Optional[str] = None
+    typeform_form_id: Optional[str] = None
+    typeform_field_map: Optional[str] = None
 
 
 class ProductCreate(ProductBase):
@@ -19,6 +22,9 @@ class ProductUpdate(BaseModel):
     product_id: Optional[str] = None
     product_name: Optional[str] = None
     kit_tag: Optional[str] = None
+    stripe_price_id: Optional[str] = None
+    typeform_form_id: Optional[str] = None
+    typeform_field_map: Optional[str] = None
 
 
 class ProductRead(ProductBase):

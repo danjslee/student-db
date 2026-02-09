@@ -60,6 +60,7 @@ def _create_enrollment(
     student: Student,
     product: Product,
     status: str = "Paying Customer (Full-fee)",
+    source: str = None,
 ) -> dict:
     """Create an enrollment (idempotent — returns existing if duplicate)."""
     enrollment_id = f"{student.email}_{product.product_id}"
@@ -72,6 +73,7 @@ def _create_enrollment(
     enrollment = Enrollment(
         enrollment_id=enrollment_id,
         status=status,
+        source=source,
         student_id=student.id,
         product_id=product.id,
     )
@@ -134,7 +136,7 @@ def kit_tag_added(kit_tag: str, payload: KitWebhookPayload, request: Request, db
 
     first, last = _split_name(sub.first_name or "")
     student = _find_or_create_student(db, sub.email_address, first, last)
-    return _create_enrollment(db, student, product)
+    return _create_enrollment(db, student, product, source="kit")
 
 
 # ---------------------------------------------------------------------------
@@ -191,7 +193,7 @@ async def stripe_checkout(request: Request, db: Session = Depends(get_db)):
     logger.info("Stripe webhook: email=%s product=%s", email, product.product_id)
     first, last = _split_name(name)
     student = _find_or_create_student(db, email, first, last)
-    return _create_enrollment(db, student, product)
+    return _create_enrollment(db, student, product, source="stripe")
 
 
 def _verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bool:
@@ -248,7 +250,7 @@ def form_submission(product_id: str, payload: FormWebhookPayload, request: Reque
 
     logger.info("Form webhook: product=%s email=%s", product_id, payload.email)
     student = _find_or_create_student(db, payload.email, first, last)
-    return _create_enrollment(db, student, product)
+    return _create_enrollment(db, student, product, source="form")
 
 
 # ---------------------------------------------------------------------------
@@ -461,7 +463,7 @@ async def typeform_submission(
         db.flush()
         logger.info("Enriched student #%d with: %s", student.student_number, updated_fields)
 
-    # Create enrollment (idempotent)
-    result = _create_enrollment(db, student, product)
+    # Create enrollment as safety net (idempotent — normally student is already enrolled)
+    result = _create_enrollment(db, student, product, source="typeform")
     result["enriched_fields"] = updated_fields
     return result

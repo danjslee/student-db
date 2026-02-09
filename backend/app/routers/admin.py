@@ -37,30 +37,59 @@ def admin_overview(db: Session = Depends(get_db)):
     )
 
     flows = []
+    archived_flows = []
     for product, count in products:
         # Enrollment flow — triggers that create student + enrollment
         triggers = []
+        has_active_trigger = False
         if product.kit_tag:
             triggers.append({"type": "Kit", "identifier": product.kit_tag,
                              "url": f"/api/webhook/kit/{product.kit_tag}"})
+            has_active_trigger = True
         if product.stripe_price_id:
             triggers.append({"type": "Stripe", "identifier": product.stripe_price_id,
                              "url": "/api/webhook/stripe"})
+            has_active_trigger = True
         triggers.append({"type": "Form", "identifier": product.product_id,
                          "url": f"/api/webhook/form/{product.product_id}"})
 
-        flows.append({
+        # Count enrollments from enrollment sources (exclude typeform-created ones)
+        from sqlalchemy import or_
+        enrollment_count = (
+            db.query(func.count(Enrollment.id))
+            .filter(
+                Enrollment.product_id == product.id,
+                or_(Enrollment.source != "typeform", Enrollment.source.is_(None)),
+            )
+            .scalar()
+        )
+        enrollment_flow = {
             "product_id": product.product_id,
             "product_name": product.product_name,
             "flow_type": "Enrollment Flow",
             "description": f"When a new student signs up for {product.product_name}, "
                            f"auto-create their student record and enrollment.",
-            "enrollment_count": count,
+            "enrollment_count": enrollment_count,
             "triggers": triggers,
-        })
+        }
+
+        if has_active_trigger:
+            flows.append(enrollment_flow)
+        else:
+            archived_flows.append(enrollment_flow)
 
         # Onboarding form — post-enrollment enrichment via Typeform
         if product.typeform_form_id:
+            # Count students who have completed onboarding for this product
+            onboarded_count = (
+                db.query(func.count(Student.id))
+                .join(Enrollment, Enrollment.student_id == Student.id)
+                .filter(
+                    Enrollment.product_id == product.id,
+                    Student.onboarding_date.isnot(None),
+                )
+                .scalar()
+            )
             flows.append({
                 "product_id": product.product_id,
                 "product_name": product.product_name,
@@ -68,7 +97,7 @@ def admin_overview(db: Session = Depends(get_db)):
                 "description": f"After enrolling in {product.product_name}, "
                                f"students complete the onboarding form to provide "
                                f"personal details, preferences, and consents.",
-                "enrollment_count": count,
+                "enrollment_count": onboarded_count,
                 "triggers": [{"type": "Typeform", "identifier": product.typeform_form_id,
                               "url": f"/api/webhook/typeform/{product.product_id}"}],
             })
@@ -90,6 +119,7 @@ def admin_overview(db: Session = Depends(get_db)):
         "total_enrollments": total_enrollments,
         "total_products": len(flows),
         "flows": flows,
+        "archived_flows": archived_flows,
         "recent_enrollments": recent_list,
     }
 

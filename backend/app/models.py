@@ -53,6 +53,7 @@ class Enrollment(Base):
     id = Column(Integer, primary_key=True, index=True)
     enrollment_id = Column(String, unique=True, nullable=False)
     status = Column(String, nullable=True)
+    source = Column(String, nullable=True)  # kit, stripe, form, typeform
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
 

@@ -50,8 +50,10 @@ def admin_overview(db: Session = Depends(get_db)):
             triggers.append({"type": "Stripe", "identifier": product.stripe_price_id,
                              "url": "/api/webhook/stripe"})
             has_active_trigger = True
-        triggers.append({"type": "Form", "identifier": product.product_id,
-                         "url": f"/api/webhook/form/{product.product_id}"})
+        # Only show Form as a trigger if no other triggers are configured
+        if not has_active_trigger:
+            triggers.append({"type": "Form", "identifier": product.product_id,
+                             "url": f"/api/webhook/form/{product.product_id}"})
 
         # Count enrollments from enrollment sources (exclude typeform-created ones)
         from sqlalchemy import or_

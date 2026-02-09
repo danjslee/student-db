@@ -260,7 +260,7 @@ _STUDENT_FIELDS = {
     "first_name", "last_name", "preferred_name", "email", "alternative_email",
     "country", "timezone", "closest_city", "dob", "gender",
     "learn_about_course", "consent_images", "consent_photo_on_site",
-    "what_made_you_join", "get_from", "here_for",
+    "what_made_you_join", "get_from", "here_for", "claude_confidence_level",
 }
 
 
@@ -280,7 +280,7 @@ def _extract_typeform_answer(answer: Dict[str, Any]) -> Any:
         return answer.get("boolean")
     elif atype == "date":
         return answer.get("date")
-    elif atype == "number":
+    elif atype in ("number", "opinion_scale"):
         return answer.get("number")
     elif atype == "phone_number":
         return answer.get("phone_number")
@@ -429,9 +429,22 @@ async def typeform_submission(
     updated_fields = []
     for field, value in parsed.items():
         if field in _STUDENT_FIELDS and field not in ("email", "first_name", "last_name"):
-            if value is not None:
-                setattr(student, field, value)
-                updated_fields.append(field)
+            if value is None:
+                continue
+            # Type coercions for SQLAlchemy column types
+            if field == "dob" and isinstance(value, str):
+                from datetime import date as date_type
+                try:
+                    value = date_type.fromisoformat(value)
+                except (ValueError, TypeError):
+                    continue
+            if field == "claude_confidence_level" and not isinstance(value, (int, float)):
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    continue
+            setattr(student, field, value)
+            updated_fields.append(field)
 
     # Set onboarding_date from Typeform's submitted_at
     submitted_at = form_response.get("submitted_at")

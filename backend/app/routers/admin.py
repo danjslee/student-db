@@ -38,6 +38,7 @@ def admin_overview(db: Session = Depends(get_db)):
 
     flows = []
     for product, count in products:
+        # Enrollment flow — triggers that create student + enrollment
         triggers = []
         if product.kit_tag:
             triggers.append({"type": "Kit", "identifier": product.kit_tag,
@@ -45,10 +46,6 @@ def admin_overview(db: Session = Depends(get_db)):
         if product.stripe_price_id:
             triggers.append({"type": "Stripe", "identifier": product.stripe_price_id,
                              "url": "/api/webhook/stripe"})
-        if product.typeform_form_id:
-            triggers.append({"type": "Typeform", "identifier": product.typeform_form_id,
-                             "url": f"/api/webhook/typeform/{product.product_id}"})
-        # Form is always available
         triggers.append({"type": "Form", "identifier": product.product_id,
                          "url": f"/api/webhook/form/{product.product_id}"})
 
@@ -61,6 +58,20 @@ def admin_overview(db: Session = Depends(get_db)):
             "enrollment_count": count,
             "triggers": triggers,
         })
+
+        # Onboarding form — post-enrollment enrichment via Typeform
+        if product.typeform_form_id:
+            flows.append({
+                "product_id": product.product_id,
+                "product_name": product.product_name,
+                "flow_type": "Onboarding Form Complete",
+                "description": f"After enrolling in {product.product_name}, "
+                               f"students complete the onboarding form to provide "
+                               f"personal details, preferences, and consents.",
+                "enrollment_count": count,
+                "triggers": [{"type": "Typeform", "identifier": product.typeform_form_id,
+                              "url": f"/api/webhook/typeform/{product.product_id}"}],
+            })
 
     recent_list = []
     for e in recent:
@@ -106,6 +117,9 @@ ADMIN_HTML = """<!DOCTYPE html>
           padding: 1.2rem; margin-bottom: 0.75rem; }
   .flow-header { display: flex; justify-content: space-between; align-items: center; }
   .flow-name { font-weight: 600; color: #fff; }
+  .flow-type { font-size: 0.7rem; color: #888; text-transform: uppercase;
+               letter-spacing: 0.05em; margin-right: 0.5rem; }
+  .flow.onboarding { border-left: 3px solid #fbbf24; }
   .flow-count { background: #2a2d37; padding: 0.2rem 0.6rem; border-radius: 12px;
                 font-size: 0.8rem; color: #aaa; }
   .triggers { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
@@ -161,11 +175,15 @@ async function load() {
       `<div class="url">${BASE}${t.url}</div>`
     ).join('');
 
+    const flowClass = f.flow_type === 'Onboarding Form Complete' ? 'flow onboarding' : 'flow';
     html += `
-      <div class="flow">
+      <div class="${flowClass}">
         <div class="flow-header">
           <span class="flow-name">${f.product_name}</span>
-          <span class="flow-count">${f.enrollment_count} enrolled</span>
+          <div>
+            <span class="flow-type">${f.flow_type}</span>
+            <span class="flow-count">${f.enrollment_count} enrolled</span>
+          </div>
         </div>
         <div class="triggers">${triggers}</div>
         ${urls}

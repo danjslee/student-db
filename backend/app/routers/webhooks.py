@@ -460,7 +460,7 @@ async def typeform_submission(
             pass
 
     if updated_fields:
-        db.flush()
+        db.commit()
         logger.info("Enriched student #%d with: %s", student.student_number, updated_fields)
 
     # Create enrollment as safety net (idempotent — normally student is already enrolled)

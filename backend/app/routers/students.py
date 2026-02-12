@@ -20,6 +20,7 @@ def list_students(
     search: Optional[str] = None,
     country: Optional[str] = None,
     city: Optional[str] = None,
+    product_id: Optional[int] = None,
     db: Session = Depends(get_db),
 ):
     q = db.query(
@@ -27,6 +28,8 @@ def list_students(
         func.count(Enrollment.id).label("enrollment_count"),
     ).outerjoin(Enrollment).group_by(Student.id)
 
+    if product_id:
+        q = q.filter(Enrollment.product_id == product_id)
     if search:
         pattern = f"%{search}%"
         q = q.filter(

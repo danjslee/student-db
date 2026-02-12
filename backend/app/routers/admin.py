@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
-from sqlalchemy import func, desc
+from sqlalchemy import func, desc, case, and_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -116,6 +116,50 @@ def admin_overview(db: Session = Depends(get_db)):
             "status": e.status,
         })
 
+    # Per-product course metrics (students + NPS)
+    all_products = db.query(Product).all()
+    course_metrics = []
+    for p in all_products:
+        student_count = (
+            db.query(func.count(func.distinct(Enrollment.student_id)))
+            .filter(Enrollment.product_id == p.id)
+            .scalar()
+        )
+        # NPS: promoters (9-10) minus detractors (0-6), as % of responses
+        nps_rows = (
+            db.query(
+                func.count(Enrollment.id).label("total"),
+                func.sum(case(
+                    (Enrollment.recommend_score >= 9, 1), else_=0
+                )).label("promoters"),
+                func.sum(case(
+                    (Enrollment.recommend_score <= 6, 1), else_=0
+                )).label("detractors"),
+            )
+            .filter(
+                Enrollment.product_id == p.id,
+                Enrollment.recommend_score.isnot(None),
+            )
+            .first()
+        )
+        nps = None
+        nps_responses = 0
+        if nps_rows and nps_rows.total and nps_rows.total > 0:
+            nps_responses = nps_rows.total
+            promoter_pct = (nps_rows.promoters or 0) / nps_rows.total * 100
+            detractor_pct = (nps_rows.detractors or 0) / nps_rows.total * 100
+            nps = round(promoter_pct - detractor_pct)
+
+        has_trigger = bool(p.kit_tag or p.stripe_price_id)
+        course_metrics.append({
+            "product_id": p.product_id,
+            "product_name": p.product_name,
+            "students": student_count,
+            "nps": nps,
+            "nps_responses": nps_responses,
+            "status": "active" if has_trigger else "archived",
+        })
+
     return {
         "total_students": total_students,
         "total_enrollments": total_enrollments,
@@ -123,6 +167,7 @@ def admin_overview(db: Session = Depends(get_db)):
         "flows": flows,
         "archived_flows": archived_flows,
         "recent_enrollments": recent_list,
+        "course_metrics": course_metrics,
     }
 
 

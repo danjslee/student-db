@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { darkTheme } from "../gridTheme";
-import { fetchEnrollments, updateEnrollment } from "../api";
+import { fetchEnrollments, fetchProducts, updateEnrollment } from "../api";
 
 const PAGE_SIZE = 200;
 
@@ -10,22 +10,31 @@ export default function EnrollmentsGrid() {
   const [skip, setSkip] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [products, setProducts] = useState([]);
+  const [selectedProduct, setSelectedProduct] = useState("");
 
   useEffect(() => {
+    fetchProducts().then(setProducts).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    setSkip(0);
     setLoading(true);
-    fetchEnrollments({ skip: 0, limit: PAGE_SIZE })
+    const product_id = selectedProduct || undefined;
+    fetchEnrollments({ skip: 0, limit: PAGE_SIZE, product_id })
       .then((data) => {
         setRowData(data);
         setHasMore(data.length >= PAGE_SIZE);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, []);
+  }, [selectedProduct]);
 
   const loadMore = useCallback(() => {
     const nextSkip = skip + PAGE_SIZE;
     setLoading(true);
-    fetchEnrollments({ skip: nextSkip, limit: PAGE_SIZE })
+    const product_id = selectedProduct || undefined;
+    fetchEnrollments({ skip: nextSkip, limit: PAGE_SIZE, product_id })
       .then((data) => {
         setRowData((prev) => [...prev, ...data]);
         setSkip(nextSkip);
@@ -33,7 +42,7 @@ export default function EnrollmentsGrid() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [skip]);
+  }, [skip, selectedProduct]);
 
   const columnDefs = useMemo(
     () => [
@@ -105,6 +114,21 @@ export default function EnrollmentsGrid() {
 
   return (
     <div className="grid-container">
+      <div className="insights-toolbar">
+        <label htmlFor="course-filter">Course:</label>
+        <select
+          id="course-filter"
+          value={selectedProduct}
+          onChange={(e) => setSelectedProduct(e.target.value)}
+        >
+          <option value="">All</option>
+          {products.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.product_name}
+            </option>
+          ))}
+        </select>
+      </div>
       <div className="grid-wrapper">
         <AgGridReact
           theme={darkTheme}

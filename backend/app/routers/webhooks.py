@@ -15,7 +15,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Enrollment, Product, Student
+from app.models import Enrollment, Product, Sale, Student
 
 logger = logging.getLogger(__name__)
 
@@ -61,12 +61,17 @@ def _create_enrollment(
     product: Product,
     status: str = "Paying Customer (Full-fee)",
     source: str = None,
+    sale_id: int = None,
 ) -> dict:
     """Create an enrollment (idempotent — returns existing if duplicate)."""
     enrollment_id = f"{student.email}_{product.product_id}"
     existing = db.query(Enrollment).filter(Enrollment.enrollment_id == enrollment_id).first()
 
     if existing:
+        # Link sale if not already linked
+        if sale_id and not existing.sale_id:
+            existing.sale_id = sale_id
+            db.commit()
         logger.info("Enrollment already exists: %s", enrollment_id)
         return {"status": "already_enrolled", "enrollment_id": enrollment_id}
 
@@ -76,6 +81,7 @@ def _create_enrollment(
         source=source,
         student_id=student.id,
         product_id=product.id,
+        sale_id=sale_id,
     )
     db.add(enrollment)
     db.commit()
@@ -193,7 +199,34 @@ async def stripe_checkout(request: Request, db: Session = Depends(get_db)):
     logger.info("Stripe webhook: email=%s product=%s", email, product.product_id)
     first, last = _split_name(name)
     student = _find_or_create_student(db, email, first, last)
-    return _create_enrollment(db, student, product, source="stripe")
+
+    # Create Sale from Stripe checkout data
+    session_id = session.get("id", "")
+    sale_id_str = f"stripe_{session_id}"
+    existing_sale = db.query(Sale).filter(Sale.sale_id == sale_id_str).first()
+    sale = existing_sale
+    if not existing_sale:
+        amount_total = session.get("amount_total") or 0
+        currency = (session.get("currency") or "usd").upper()
+        payment_intent = session.get("payment_intent")
+        sale = Sale(
+            sale_id=sale_id_str,
+            buyer_email=email.lower().strip(),
+            buyer_name=name or None,
+            product_id=product.id,
+            amount_cents=amount_total,
+            currency=currency,
+            quantity=1,
+            status="completed",
+            source="stripe",
+            stripe_checkout_session_id=session_id,
+            stripe_payment_intent_id=payment_intent if isinstance(payment_intent, str) else None,
+            purchase_date=datetime.utcnow(),
+        )
+        db.add(sale)
+        db.flush()
+
+    return _create_enrollment(db, student, product, source="stripe", sale_id=sale.id)
 
 
 def _verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bool:

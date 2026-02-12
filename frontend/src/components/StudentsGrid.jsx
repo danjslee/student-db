@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
 import { darkTheme } from "../gridTheme";
-import { fetchStudents, updateStudent } from "../api";
+import { fetchStudents, fetchProducts, updateStudent } from "../api";
 
 const PAGE_SIZE = 200;
 
@@ -12,7 +12,13 @@ export default function StudentsGrid() {
   const [skip, setSkip] = useState(0);
   const [hasMore, setHasMore] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [products, setProducts] = useState([]);
+  const [selectedProduct, setSelectedProduct] = useState("");
   const initialLoad = useRef(true);
+
+  useEffect(() => {
+    fetchProducts().then(setProducts).catch(console.error);
+  }, []);
 
   // Debounce search input
   useEffect(() => {
@@ -20,26 +26,28 @@ export default function StudentsGrid() {
     return () => clearTimeout(timer);
   }, [searchText]);
 
-  // Fetch data when debounced search changes (reset pagination)
+  // Fetch data when debounced search or product filter changes (reset pagination)
   useEffect(() => {
     if (initialLoad.current) {
       initialLoad.current = false;
     }
     setSkip(0);
     setLoading(true);
-    fetchStudents({ skip: 0, limit: PAGE_SIZE, search: debouncedSearch || undefined })
+    const product_id = selectedProduct || undefined;
+    fetchStudents({ skip: 0, limit: PAGE_SIZE, search: debouncedSearch || undefined, product_id })
       .then((data) => {
         setRowData(data);
         setHasMore(data.length >= PAGE_SIZE);
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [debouncedSearch]);
+  }, [debouncedSearch, selectedProduct]);
 
   const loadMore = useCallback(() => {
     const nextSkip = skip + PAGE_SIZE;
     setLoading(true);
-    fetchStudents({ skip: nextSkip, limit: PAGE_SIZE, search: debouncedSearch || undefined })
+    const product_id = selectedProduct || undefined;
+    fetchStudents({ skip: nextSkip, limit: PAGE_SIZE, search: debouncedSearch || undefined, product_id })
       .then((data) => {
         setRowData((prev) => [...prev, ...data]);
         setSkip(nextSkip);
@@ -47,7 +55,7 @@ export default function StudentsGrid() {
       })
       .catch(console.error)
       .finally(() => setLoading(false));
-  }, [skip, debouncedSearch]);
+  }, [skip, debouncedSearch, selectedProduct]);
 
   const columnDefs = useMemo(
     () => [
@@ -113,7 +121,20 @@ export default function StudentsGrid() {
 
   return (
     <div className="grid-container">
-      <div className="search-bar">
+      <div className="insights-toolbar">
+        <label htmlFor="student-course-filter">Course:</label>
+        <select
+          id="student-course-filter"
+          value={selectedProduct}
+          onChange={(e) => setSelectedProduct(e.target.value)}
+        >
+          <option value="">All</option>
+          {products.map((p) => (
+            <option key={p.id} value={p.id}>
+              {p.product_name}
+            </option>
+          ))}
+        </select>
         <input
           className="search-input"
           type="text"

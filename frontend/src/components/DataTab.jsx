@@ -3,8 +3,9 @@ import TabBar from "./TabBar";
 import StudentsGrid from "./StudentsGrid";
 import ProductsGrid from "./ProductsGrid";
 import EnrollmentsGrid from "./EnrollmentsGrid";
+import SalesGrid from "./SalesGrid";
 
-const SUB_TABS = ["Students", "Products", "Enrollments"];
+const SUB_TABS = ["Students", "Products", "Enrollments", "Sales"];
 
 export default function DataTab() {
   const [activeTab, setActiveTab] = useState("Students");
@@ -15,6 +16,7 @@ export default function DataTab() {
       {activeTab === "Students" && <StudentsGrid />}
       {activeTab === "Products" && <ProductsGrid />}
       {activeTab === "Enrollments" && <EnrollmentsGrid />}
+      {activeTab === "Sales" && <SalesGrid />}
     </>
   );
 }

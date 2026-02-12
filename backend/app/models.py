@@ -18,6 +18,7 @@ class Product(Base):
     typeform_field_map = Column(Text, nullable=True)
 
     enrollments = relationship("Enrollment", back_populates="product")
+    sales = relationship("Sale", back_populates="product")
 
 
 class Student(Base):
@@ -56,9 +57,11 @@ class Enrollment(Base):
     source = Column(String, nullable=True)  # kit, stripe, form, typeform
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)
 
     student = relationship("Student", back_populates="enrollments")
     product = relationship("Product", back_populates="enrollments")
+    sale = relationship("Sale", back_populates="enrollments")
 
     # Survey fields (populated from CSV import)
     response_hash = Column(String, nullable=True)
@@ -80,3 +83,25 @@ class Enrollment(Base):
     survey_submit_date = Column(DateTime, nullable=True)
     survey_network_id = Column(String, nullable=True)
     survey_tags = Column(String, nullable=True)
+
+
+class Sale(Base):
+    __tablename__ = "sales"
+
+    id = Column(Integer, primary_key=True, index=True)
+    sale_id = Column(String, unique=True, nullable=False)
+    buyer_email = Column(String, nullable=False)
+    buyer_name = Column(String, nullable=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    amount_cents = Column(Integer, nullable=False)
+    currency = Column(String, default="USD")
+    quantity = Column(Integer, default=1)
+    status = Column(String, default="completed")  # completed, refunded
+    source = Column(String, nullable=True)  # stripe, csv, manual
+    stripe_checkout_session_id = Column(String, nullable=True)
+    stripe_payment_intent_id = Column(String, nullable=True)
+    purchase_date = Column(DateTime, nullable=True)
+    notes = Column(Text, nullable=True)
+
+    product = relationship("Product", back_populates="sales")
+    enrollments = relationship("Enrollment", back_populates="sale")

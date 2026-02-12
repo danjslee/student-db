@@ -4,13 +4,14 @@ const BASE_URL = window.location.hostname === "localhost"
 
 // ── Students ──────────────────────────────────────────────
 
-export async function fetchStudents({ skip = 0, limit = 200, search, country, city } = {}) {
+export async function fetchStudents({ skip = 0, limit = 200, search, country, city, product_id } = {}) {
   const params = new URLSearchParams();
   params.set("skip", skip);
   params.set("limit", limit);
   if (search) params.set("search", search);
   if (country) params.set("country", country);
   if (city) params.set("city", city);
+  if (product_id) params.set("product_id", product_id);
   const res = await fetch(`${BASE_URL}/students/?${params}`);
   if (!res.ok) throw new Error(`Failed to fetch students: ${res.status}`);
   return res.json();
@@ -115,6 +116,43 @@ export async function fetchSatisfactionDistribution() {
 export async function fetchNpsDistribution() {
   const res = await fetch(`${BASE_URL}/analytics/nps-distribution`);
   if (!res.ok) throw new Error(`Failed to fetch NPS distribution: ${res.status}`);
+  return res.json();
+}
+
+// ── Sales ─────────────────────────────────────────────────
+
+export async function fetchSales({ skip = 0, limit = 200, product_id, status } = {}) {
+  const params = new URLSearchParams();
+  params.set("skip", skip);
+  params.set("limit", limit);
+  if (product_id) params.set("product_id", product_id);
+  if (status) params.set("status", status);
+  const res = await fetch(`${BASE_URL}/sales/?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch sales: ${res.status}`);
+  return res.json();
+}
+
+export async function updateSale(id, fields) {
+  const res = await fetch(`${BASE_URL}/sales/${id}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(fields),
+  });
+  if (!res.ok) throw new Error(`Failed to update sale: ${res.status}`);
+  return res.json();
+}
+
+export async function importSalesCSV(productId, file) {
+  const formData = new FormData();
+  formData.append("file", file);
+  const res = await fetch(`${BASE_URL}/sales/import-csv?product_id=${encodeURIComponent(productId)}`, {
+    method: "POST",
+    body: formData,
+  });
+  if (!res.ok) {
+    const detail = await res.text();
+    throw new Error(`CSV import failed: ${detail}`);
+  }
   return res.json();
 }
 

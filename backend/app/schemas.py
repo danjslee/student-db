@@ -40,6 +40,7 @@ class EnrollmentBrief(BaseModel):
     id: int
     enrollment_id: str
     status: Optional[str] = None
+    sale_id: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
@@ -146,6 +147,7 @@ class EnrollmentBase(BaseModel):
     status: Optional[str] = None
     student_id: int
     product_id: int
+    sale_id: Optional[int] = None
     # Survey fields
     response_hash: Optional[str] = None
     biggest_win: Optional[str] = None
@@ -176,6 +178,7 @@ class EnrollmentUpdate(BaseModel):
     status: Optional[str] = None
     student_id: Optional[int] = None
     product_id: Optional[int] = None
+    sale_id: Optional[int] = None
     # Survey fields
     biggest_win: Optional[str] = None
     three_things_learned: Optional[str] = None
@@ -222,5 +225,70 @@ class CountItem(BaseModel):
 class TimelineItem(BaseModel):
     date: str
     count: int
+
+
+# ---------- Sale ----------
+
+class SaleBrief(BaseModel):
+    id: int
+    sale_id: str
+    buyer_email: str
+    amount_cents: int
+    status: str
+
+    model_config = {"from_attributes": True}
+
+
+class SaleBase(BaseModel):
+    sale_id: str
+    buyer_email: str
+    buyer_name: Optional[str] = None
+    product_id: int
+    amount_cents: int
+    currency: str = "USD"
+    quantity: int = 1
+    status: str = "completed"
+    source: Optional[str] = None
+    stripe_checkout_session_id: Optional[str] = None
+    stripe_payment_intent_id: Optional[str] = None
+    purchase_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class SaleCreate(SaleBase):
+    pass
+
+
+class SaleUpdate(BaseModel):
+    buyer_email: Optional[str] = None
+    buyer_name: Optional[str] = None
+    amount_cents: Optional[int] = None
+    currency: Optional[str] = None
+    quantity: Optional[int] = None
+    status: Optional[str] = None
+    source: Optional[str] = None
+    notes: Optional[str] = None
+    purchase_date: Optional[datetime] = None
+
+
+class SaleRead(SaleBase):
+    id: int
+    product: ProductBase
+
+    model_config = {"from_attributes": True}
+
+
+class SaleList(SaleBase):
+    id: int
+    product_name: str = ""
+
+    model_config = {"from_attributes": True}
+
+
+class SaleCSVImportResult(BaseModel):
+    created: int
+    skipped: int
+    linked: int
+    errors: List[str] = []
 
 

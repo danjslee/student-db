@@ -142,6 +142,7 @@ async def import_sales_csv(
     col_date = find_col(fields, "purchase date", "date")
     col_status = find_col(fields, "rsvp", "status")
     col_price = find_col(fields, "price", "amount", "paid")
+    col_scholarship = find_col(fields, "scholarship")
 
     if not col_email:
         raise HTTPException(400, f"No email column found. Columns: {fields}")
@@ -172,8 +173,19 @@ async def import_sales_csv(
                 skipped += 1
                 continue
 
-            status = "refunded" if "refund" in status_str.lower() else "completed"
+            # Status: completed, refunded, deferred
+            status_lower = status_str.lower()
+            if "refund" in status_lower:
+                status = "refunded"
+            elif "defer" in status_lower:
+                status = "deferred"
+            else:
+                status = "completed"
             amount_cents = _parse_price(price_str)
+
+            # Scholarship flag
+            scholarship_str = (row.get(col_scholarship) or "").strip().lower() if col_scholarship else ""
+            is_scholarship = 1 if scholarship_str in ("yes", "y", "true", "1") else 0
 
             sale = Sale(
                 sale_id=sale_id_str,
@@ -184,6 +196,7 @@ async def import_sales_csv(
                 currency="USD",
                 quantity=1,
                 status=status,
+                scholarship=is_scholarship,
                 source="csv",
                 purchase_date=purchase_date,
                 notes=status_str if status_str else None,

@@ -1,20 +1,25 @@
-import { useState } from "react";
+import { useState, lazy, Suspense } from "react";
 import "./App.css";
 import TabBar from "./components/TabBar";
-import InsightsTab from "./components/InsightsTab";
-import DataTab from "./components/DataTab";
+import OverviewTab from "./components/OverviewTab";
 import ChatWidget from "./components/ChatWidget";
 
-const TABS = ["Insights & Charts", "Data"];
+const DetailedDataTab = lazy(() => import("./components/DetailedDataTab"));
+const DataTab = lazy(() => import("./components/DataTab"));
+
+const TABS = ["Overview", "Detailed Data", "Database"];
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState("Insights & Charts");
+  const [activeTab, setActiveTab] = useState("Overview");
 
   return (
     <div className="app">
       <TabBar tabs={TABS} active={activeTab} onSelect={setActiveTab} />
-      {activeTab === "Insights & Charts" && <InsightsTab />}
-      {activeTab === "Data" && <DataTab />}
+      <Suspense fallback={<div className="tab-loading">Loading...</div>}>
+        {activeTab === "Overview" && <OverviewTab />}
+        {activeTab === "Detailed Data" && <DetailedDataTab />}
+        {activeTab === "Database" && <DataTab />}
+      </Suspense>
       <ChatWidget />
     </div>
   );

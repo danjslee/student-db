@@ -1,12 +1,7 @@
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell,
 } from "recharts";
+import { npsColor, tooltipStyle, axisProps, gridProps } from "../chartTheme";
 
 export default function NpsChart({ data }) {
   if (!data || data.length === 0) {
@@ -18,28 +13,15 @@ export default function NpsChart({ data }) {
       <h3>NPS Score Distribution</h3>
       <ResponsiveContainer width="100%" height={300}>
         <BarChart data={data} margin={{ top: 5, right: 20, bottom: 60, left: 10 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#292524" />
-          <XAxis
-            dataKey="label"
-            angle={-45}
-            textAnchor="end"
-            interval={0}
-            tick={{ fontSize: 11, fill: "#a8a29e" }}
-            axisLine={{ stroke: "#44403c" }}
-            tickLine={{ stroke: "#44403c" }}
-          />
-          <YAxis
-            allowDecimals={false}
-            tick={{ fill: "#a8a29e" }}
-            axisLine={{ stroke: "#44403c" }}
-            tickLine={{ stroke: "#44403c" }}
-          />
-          <Tooltip
-            contentStyle={{ backgroundColor: "#292524", border: "1px solid #44403c", borderRadius: "8px", color: "#fff" }}
-            labelStyle={{ color: "#d6d3d1" }}
-            itemStyle={{ color: "#fff" }}
-          />
-          <Bar dataKey="count" fill="#e11d48" radius={[4, 4, 0, 0]} />
+          <CartesianGrid {...gridProps} />
+          <XAxis dataKey="label" angle={-45} textAnchor="end" interval={0} {...axisProps.x} />
+          <YAxis allowDecimals={false} {...axisProps.y} />
+          <Tooltip {...tooltipStyle} />
+          <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+            {data.map((entry, i) => (
+              <Cell key={i} fill={npsColor(parseInt(entry.label) || 0)} />
+            ))}
+          </Bar>
         </BarChart>
       </ResponsiveContainer>
     </div>

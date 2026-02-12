@@ -168,6 +168,8 @@ class EnrollmentBase(BaseModel):
     survey_submit_date: Optional[datetime] = None
     survey_network_id: Optional[str] = None
     survey_tags: Optional[str] = None
+    transformational_score: Optional[int] = None
+    delivered_on_promise_score: Optional[int] = None
 
 
 class EnrollmentCreate(EnrollmentBase):
@@ -192,6 +194,8 @@ class EnrollmentUpdate(BaseModel):
     beginner_friendly_rating: Optional[str] = None
     expected_learning_not_covered: Optional[str] = None
     anything_else: Optional[str] = None
+    transformational_score: Optional[int] = None
+    delivered_on_promise_score: Optional[int] = None
 
 
 class EnrollmentRead(EnrollmentBase):
@@ -248,6 +252,7 @@ class SaleBase(BaseModel):
     currency: str = "USD"
     quantity: int = 1
     status: str = "completed"
+    scholarship: int = 0
     source: Optional[str] = None
     stripe_checkout_session_id: Optional[str] = None
     stripe_payment_intent_id: Optional[str] = None
@@ -266,6 +271,7 @@ class SaleUpdate(BaseModel):
     currency: Optional[str] = None
     quantity: Optional[int] = None
     status: Optional[str] = None
+    scholarship: Optional[int] = None
     source: Optional[str] = None
     notes: Optional[str] = None
     purchase_date: Optional[datetime] = None

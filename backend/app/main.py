@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from sqlalchemy import inspect, text
 
 from app.database import engine, Base
-from app.routers import students, products, enrollments, chat, analytics, webhooks, admin, sales
+from app.routers import students, products, enrollments, chat, analytics, webhooks, admin, sales, qualitative
 
 # Create tables on startup (creates new tables like 'sales')
 Base.metadata.create_all(bind=engine)
@@ -30,6 +30,9 @@ _add_column_if_missing("enrollments", "sale_id", "INTEGER REFERENCES sales(id)")
 _add_column_if_missing("enrollments", "source", "TEXT")
 _add_column_if_missing("products", "typeform_form_id", "TEXT")
 _add_column_if_missing("products", "typeform_field_map", "TEXT")
+_add_column_if_missing("enrollments", "transformational_score", "INTEGER")
+_add_column_if_missing("enrollments", "delivered_on_promise_score", "INTEGER")
+_add_column_if_missing("sales", "scholarship", "INTEGER DEFAULT 0")
 
 app = FastAPI(title="Every Student Database", version="1.0.0")
 
@@ -85,6 +88,7 @@ app.include_router(analytics.router)
 app.include_router(webhooks.router)
 app.include_router(admin.router)
 app.include_router(sales.router)
+app.include_router(qualitative.router)
 
 # Serve the React frontend (built files)
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend_dist"

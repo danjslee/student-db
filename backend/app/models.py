@@ -83,6 +83,8 @@ class Enrollment(Base):
     survey_submit_date = Column(DateTime, nullable=True)
     survey_network_id = Column(String, nullable=True)
     survey_tags = Column(String, nullable=True)
+    transformational_score = Column(Integer, nullable=True)
+    delivered_on_promise_score = Column(Integer, nullable=True)
 
 
 class Sale(Base):
@@ -96,7 +98,8 @@ class Sale(Base):
     amount_cents = Column(Integer, nullable=False)
     currency = Column(String, default="USD")
     quantity = Column(Integer, default=1)
-    status = Column(String, default="completed")  # completed, refunded
+    status = Column(String, default="completed")  # completed, refunded, deferred
+    scholarship = Column(Integer, default=0)  # 0=no, 1=yes
     source = Column(String, nullable=True)  # stripe, csv, manual
     stripe_checkout_session_id = Column(String, nullable=True)
     stripe_payment_intent_id = Column(String, nullable=True)

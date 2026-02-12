@@ -87,35 +87,137 @@ export async function deleteEnrollment(id) {
   return res.json();
 }
 
-// ── Analytics ────────────────────────────────────────────
+// ── Analytics — Overview ─────────────────────────────────
 
-export async function fetchStudentsByCountry(productId) {
+export async function fetchOverview(year) {
+  const params = new URLSearchParams();
+  if (year) params.set("year", year);
+  const res = await fetch(`${BASE_URL}/analytics/overview?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch overview: ${res.status}`);
+  return res.json();
+}
+
+// ── Analytics — Distributions (support product_ids) ──────
+
+function _analyticsUrl(path, productIds) {
+  const params = new URLSearchParams();
+  if (productIds) params.set("product_ids", productIds);
+  return `${BASE_URL}/analytics/${path}?${params}`;
+}
+
+export async function fetchStudentsByCountry(productId, productIds) {
   const params = new URLSearchParams();
   if (productId) params.set("product_id", productId);
+  if (productIds) params.set("product_ids", productIds);
   const res = await fetch(`${BASE_URL}/analytics/students-by-country?${params}`);
   if (!res.ok) throw new Error(`Failed to fetch students by country: ${res.status}`);
   return res.json();
 }
 
-export async function fetchStudentsByCity(productId) {
+export async function fetchStudentsByCity(productId, productIds) {
   const params = new URLSearchParams();
   if (productId) params.set("product_id", productId);
+  if (productIds) params.set("product_ids", productIds);
   const res = await fetch(`${BASE_URL}/analytics/students-by-city?${params}`);
   if (!res.ok) throw new Error(`Failed to fetch students by city: ${res.status}`);
   return res.json();
 }
 
-// ── Analytics (survey) ──────────────────────────────────
-
-export async function fetchSatisfactionDistribution() {
-  const res = await fetch(`${BASE_URL}/analytics/satisfaction-distribution`);
-  if (!res.ok) throw new Error(`Failed to fetch satisfaction distribution: ${res.status}`);
+export async function fetchTimezoneDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("timezone-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return res.json();
 }
 
-export async function fetchNpsDistribution() {
-  const res = await fetch(`${BASE_URL}/analytics/nps-distribution`);
-  if (!res.ok) throw new Error(`Failed to fetch NPS distribution: ${res.status}`);
+export async function fetchAgeDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("age-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchGenderDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("gender-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchReferralSources(productIds) {
+  const res = await fetch(_analyticsUrl("referral-sources", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchHereForDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("here-for-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchGetFromDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("get-from-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSurveyResponseRates(productIds) {
+  const res = await fetch(_analyticsUrl("survey-response-rates", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchConfidenceDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("confidence-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchConfidenceAfterDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("confidence-after-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSatisfactionDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("satisfaction-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchNpsDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("nps-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTransformationalDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("transformational-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDeliveredOnPromiseDistribution(productIds) {
+  const res = await fetch(_analyticsUrl("delivered-on-promise-distribution", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
+  return res.json();
+}
+
+// ── Analytics — Qualitative ──────────────────────────────
+
+export async function fetchQualitativeAnalysis(productIds, field) {
+  const res = await fetch(`${BASE_URL}/analytics/qualitative`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ product_ids: productIds, field }),
+  });
+  if (!res.ok) throw new Error(`Qualitative analysis failed: ${res.status}`);
+  return res.json();
+}
+
+// ── Analytics — Testimonials ─────────────────────────────
+
+export async function fetchTestimonials(productIds) {
+  const res = await fetch(_analyticsUrl("testimonials", productIds));
+  if (!res.ok) throw new Error(`Failed: ${res.status}`);
   return res.json();
 }
 

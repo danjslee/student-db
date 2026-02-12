@@ -2,9 +2,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import os
+import secrets
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -40,6 +41,40 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Basic auth — protects all routes except webhooks and static assets
+DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+
+# Paths that skip auth (webhooks need to stay public)
+_PUBLIC_PREFIXES = ("/api/webhook/", "/docs", "/openapi.json", "/assets/")
+
+
+@app.middleware("http")
+async def basic_auth_middleware(request: Request, call_next):
+    path = request.url.path
+
+    # Skip auth for public paths
+    if not DASHBOARD_PASSWORD or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    # Check for Basic auth header
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Basic "):
+        import base64
+        try:
+            decoded = base64.b64decode(auth[6:]).decode()
+            username, password = decoded.split(":", 1)
+            if secrets.compare_digest(password, DASHBOARD_PASSWORD):
+                return await call_next(request)
+        except Exception:
+            pass
+
+    # No valid auth — return 401 with WWW-Authenticate to trigger browser login prompt
+    return Response(
+        status_code=401,
+        headers={"WWW-Authenticate": 'Basic realm="Student Dashboard"'},
+        content="Unauthorized",
+    )
 
 # Register routers
 app.include_router(students.router)

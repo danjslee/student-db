@@ -12,6 +12,7 @@ class ProductBase(BaseModel):
     stripe_price_id: Optional[str] = None
     typeform_form_id: Optional[str] = None
     typeform_field_map: Optional[str] = None
+    deferred_optin_form_id: Optional[str] = None
 
 
 class ProductCreate(ProductBase):
@@ -25,6 +26,7 @@ class ProductUpdate(BaseModel):
     stripe_price_id: Optional[str] = None
     typeform_form_id: Optional[str] = None
     typeform_field_map: Optional[str] = None
+    deferred_optin_form_id: Optional[str] = None
 
 
 class ProductRead(ProductBase):

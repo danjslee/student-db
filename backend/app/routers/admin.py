@@ -80,6 +80,27 @@ def admin_overview(db: Session = Depends(get_db)):
         else:
             archived_flows.append(enrollment_flow)
 
+        # Deferred opt-in — lets deferred students opt into a new cohort
+        if product.deferred_optin_form_id:
+            optin_count = (
+                db.query(func.count(Enrollment.id))
+                .filter(
+                    Enrollment.product_id == product.id,
+                    Enrollment.source == "typeform",
+                )
+                .scalar()
+            )
+            flows.append({
+                "product_id": product.product_id,
+                "product_name": product.product_name,
+                "flow_type": "Deferred Opt-In",
+                "description": f"Deferred students can opt in to {product.product_name} "
+                               f"via a Typeform — auto-enrolls on submission.",
+                "enrollment_count": optin_count,
+                "triggers": [{"type": "Typeform", "identifier": product.deferred_optin_form_id,
+                              "url": f"/api/webhook/typeform/{product.product_id}"}],
+            })
+
         # Onboarding form — post-enrollment enrichment via Typeform
         if product.typeform_form_id:
             # Count students who have completed onboarding for this product
@@ -197,6 +218,7 @@ ADMIN_HTML = """<!DOCTYPE html>
   .flow-type { font-size: 0.7rem; color: #888; text-transform: uppercase;
                letter-spacing: 0.05em; margin-right: 0.5rem; }
   .flow.onboarding { border-left: 3px solid #fbbf24; }
+  .flow.deferred { border-left: 3px solid #a78bfa; }
   .flow-count { background: #2a2d37; padding: 0.2rem 0.6rem; border-radius: 12px;
                 font-size: 0.8rem; color: #aaa; }
   .triggers { display: flex; gap: 0.5rem; margin-top: 0.6rem; flex-wrap: wrap; }
@@ -252,7 +274,8 @@ async function load() {
       `<div class="url">${BASE}${t.url}</div>`
     ).join('');
 
-    const flowClass = f.flow_type === 'Onboarding Form Complete' ? 'flow onboarding' : 'flow';
+    const flowClass = f.flow_type === 'Onboarding Form Complete' ? 'flow onboarding'
+                     : f.flow_type === 'Deferred Opt-In' ? 'flow deferred' : 'flow';
     html += `
       <div class="${flowClass}">
         <div class="flow-header">

@@ -33,6 +33,7 @@ _add_column_if_missing("products", "typeform_field_map", "TEXT")
 _add_column_if_missing("enrollments", "transformational_score", "INTEGER")
 _add_column_if_missing("enrollments", "delivered_on_promise_score", "INTEGER")
 _add_column_if_missing("sales", "scholarship", "INTEGER DEFAULT 0")
+_add_column_if_missing("products", "deferred_optin_form_id", "TEXT")
 
 app = FastAPI(title="Every Student Database", version="1.0.0")
 

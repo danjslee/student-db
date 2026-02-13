@@ -16,6 +16,7 @@ class Product(Base):
     stripe_price_id = Column(String, nullable=True)
     typeform_form_id = Column(String, nullable=True)
     typeform_field_map = Column(Text, nullable=True)
+    deferred_optin_form_id = Column(String, nullable=True)
 
     enrollments = relationship("Enrollment", back_populates="product")
     sales = relationship("Sale", back_populates="product")

@@ -13,6 +13,9 @@ class ProductBase(BaseModel):
     typeform_form_id: Optional[str] = None
     typeform_field_map: Optional[str] = None
     deferred_optin_form_id: Optional[str] = None
+    completion_survey_form_id: Optional[str] = None
+    completion_survey_field_map: Optional[str] = None
+    kit_onboarded_tag: Optional[str] = None
 
 
 class ProductCreate(ProductBase):
@@ -27,6 +30,9 @@ class ProductUpdate(BaseModel):
     typeform_form_id: Optional[str] = None
     typeform_field_map: Optional[str] = None
     deferred_optin_form_id: Optional[str] = None
+    completion_survey_form_id: Optional[str] = None
+    completion_survey_field_map: Optional[str] = None
+    kit_onboarded_tag: Optional[str] = None
 
 
 class ProductRead(ProductBase):

@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/webhook", tags=["webhooks"])
 
 KIT_WEBHOOK_SECRET = os.getenv("KIT_WEBHOOK_SECRET", "")
+KIT_API_KEY = os.getenv("KIT_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 TYPEFORM_WEBHOOK_SECRET = os.getenv("TYPEFORM_WEBHOOK_SECRET", "")
 
@@ -101,6 +102,80 @@ def _split_name(full_name: str) -> tuple:
     first = parts[0] if parts else "Unknown"
     last = parts[1] if len(parts) > 1 else ""
     return first, last
+
+
+# ---------------------------------------------------------------------------
+# Kit API helpers — outbound calls to tag subscribers
+# ---------------------------------------------------------------------------
+
+import urllib.request
+import urllib.error
+
+_KIT_API_BASE = "https://api.kit.com/v4"
+
+
+def _kit_api_request(method: str, path: str, body: dict = None) -> Optional[dict]:
+    """Make an authenticated request to Kit API v4. Returns parsed JSON or None on failure."""
+    if not KIT_API_KEY:
+        logger.warning("KIT_API_KEY not set — skipping Kit API call")
+        return None
+    url = f"{_KIT_API_BASE}{path}"
+    data = json.dumps(body).encode() if body else b"{}"
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("X-Kit-Api-Key", KIT_API_KEY)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        logger.error("Kit API %s %s → %d: %s", method, path, e.code, e.read().decode()[:200])
+        return None
+    except Exception as e:
+        logger.error("Kit API %s %s failed: %s", method, path, e)
+        return None
+
+
+def _kit_find_or_create_tag(tag_name: str) -> Optional[int]:
+    """Create a tag in Kit (idempotent — returns existing if name matches). Returns tag ID."""
+    result = _kit_api_request("POST", "/tags", {"name": tag_name})
+    if result and "tag" in result:
+        return result["tag"]["id"]
+    return None
+
+
+def _kit_find_subscriber_by_email(email: str) -> Optional[int]:
+    """Find a Kit subscriber by email. Returns subscriber ID or None."""
+    clean = email.lower().strip()
+    encoded = urllib.request.quote(clean)
+    result = _kit_api_request("GET", f"/subscribers?email_address={encoded}")
+    if result and result.get("subscribers"):
+        return result["subscribers"][0]["id"]
+    return None
+
+
+def _kit_tag_subscriber(tag_id: int, subscriber_id: int) -> bool:
+    """Add a tag to a subscriber. Returns True on success."""
+    result = _kit_api_request("POST", f"/tags/{tag_id}/subscribers/{subscriber_id}")
+    return result is not None
+
+
+def kit_tag_subscriber_by_email(email: str, tag_name: str) -> bool:
+    """
+    High-level: find subscriber by email, find/create tag, apply tag.
+    Returns True if successful, False otherwise. Non-blocking on failure.
+    """
+    subscriber_id = _kit_find_subscriber_by_email(email)
+    if not subscriber_id:
+        logger.warning("Kit: subscriber not found for %s — skipping tag '%s'", email, tag_name)
+        return False
+    tag_id = _kit_find_or_create_tag(tag_name)
+    if not tag_id:
+        logger.error("Kit: failed to find/create tag '%s'", tag_name)
+        return False
+    success = _kit_tag_subscriber(tag_id, subscriber_id)
+    if success:
+        logger.info("Kit: tagged %s with '%s'", email, tag_name)
+    return success
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +364,15 @@ def form_submission(product_id: str, payload: FormWebhookPayload, request: Reque
 # ---------------------------------------------------------------------------
 # 4. Typeform — form_response submitted
 # ---------------------------------------------------------------------------
+
+# Enrollment survey fields that can be populated from a completion survey
+_ENROLLMENT_SURVEY_FIELDS = {
+    "biggest_win", "three_things_learned", "confidence_after", "satisfaction",
+    "recommend_score", "testimonial", "improvement_suggestion",
+    "interest_longer_program", "followup_topics", "beginner_friendly_rating",
+    "expected_learning_not_covered", "anything_else",
+    "transformational_score", "delivered_on_promise_score",
+}
 
 # Student model fields that can be enriched via Typeform
 _STUDENT_FIELDS = {
@@ -496,7 +580,162 @@ async def typeform_submission(
         db.commit()
         logger.info("Enriched student #%d with: %s", student.student_number, updated_fields)
 
+    # Tag subscriber in Kit if product has an onboarded tag configured
+    kit_tagged = False
+    if product.kit_onboarded_tag:
+        kit_tagged = kit_tag_subscriber_by_email(email, product.kit_onboarded_tag)
+
     # Create enrollment as safety net (idempotent — normally student is already enrolled)
     result = _create_enrollment(db, student, product, source="typeform")
     result["enriched_fields"] = updated_fields
+    if product.kit_onboarded_tag:
+        result["kit_tagged"] = kit_tagged
     return result
+
+
+# ---------------------------------------------------------------------------
+# 5. Typeform completion survey — updates enrollment with survey responses
+# ---------------------------------------------------------------------------
+
+def _parse_completion_answers(
+    form_response: Dict[str, Any],
+    field_map: Optional[Dict[str, str]] = None,
+) -> Dict[str, Any]:
+    """
+    Parse Typeform completion survey answers into enrollment survey fields.
+
+    Mapping priority:
+    1. Explicit field_map: {typeform_field_ref: enrollment_field_name}
+    2. Convention: field ref matches enrollment survey column name
+    """
+    answers = form_response.get("answers", [])
+    result: Dict[str, Any] = {}
+
+    for answer in answers:
+        field_ref = answer.get("field", {}).get("ref", "")
+        value = _extract_typeform_answer(answer)
+        if value is None:
+            continue
+
+        # 1. Explicit mapping
+        if field_map and field_ref in field_map:
+            target = field_map[field_ref]
+            result[target] = value
+            continue
+
+        # 2. Convention: ref matches enrollment survey field
+        if field_ref in _ENROLLMENT_SURVEY_FIELDS:
+            result[field_ref] = value
+            continue
+
+        # 3. Auto-detect email field
+        if answer.get("type") == "email" and "email" not in result:
+            result["email"] = value
+
+    return result
+
+
+@router.post("/typeform/{product_id}/completion")
+async def typeform_completion_survey(
+    product_id: str, request: Request, db: Session = Depends(get_db),
+):
+    """
+    Typeform completion survey webhook.
+    URL pattern: /api/webhook/typeform/{product_id}/completion
+
+    Finds the student's enrollment and populates survey response fields.
+    """
+    body = await request.body()
+
+    # Verify signature if secret is configured
+    if TYPEFORM_WEBHOOK_SECRET:
+        sig_header = request.headers.get("Typeform-Signature", "")
+        if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
+            raise HTTPException(401, "Invalid Typeform signature")
+
+    payload = json.loads(body)
+
+    # Validate event type
+    event_type = payload.get("event_type")
+    if event_type != "form_response":
+        return {"status": "ignored", "event_type": event_type}
+
+    form_response = payload.get("form_response", {})
+
+    # Look up product
+    product = db.query(Product).filter(Product.product_id == product_id).first()
+    if not product:
+        raise HTTPException(404, f"No product with product_id '{product_id}'")
+
+    # Optionally validate form_id
+    form_id = form_response.get("form_id")
+    if product.completion_survey_form_id and form_id != product.completion_survey_form_id:
+        raise HTTPException(
+            400,
+            f"Form ID mismatch: expected {product.completion_survey_form_id}, got {form_id}",
+        )
+
+    # Parse field map from product config
+    field_map = None
+    if product.completion_survey_field_map:
+        try:
+            field_map = json.loads(product.completion_survey_field_map)
+        except json.JSONDecodeError:
+            logger.warning("Invalid completion_survey_field_map JSON for product %s", product_id)
+
+    # Extract survey data from answers
+    parsed = _parse_completion_answers(form_response, field_map)
+
+    email = parsed.pop("email", None)
+    if not email:
+        raise HTTPException(400, "No email found in completion survey response")
+
+    clean_email = email.lower().strip()
+    logger.info("Completion survey: product=%s email=%s fields=%s", product_id, clean_email, list(parsed.keys()))
+
+    # Find the student
+    student = db.query(Student).filter(func.lower(Student.email) == clean_email).first()
+    if not student:
+        raise HTTPException(404, f"No student found with email '{clean_email}'")
+
+    # Find the enrollment
+    enrollment = (
+        db.query(Enrollment)
+        .filter(Enrollment.student_id == student.id, Enrollment.product_id == product.id)
+        .first()
+    )
+    if not enrollment:
+        raise HTTPException(404, f"No enrollment found for student '{clean_email}' in product '{product_id}'")
+
+    # Update enrollment with survey fields
+    updated_fields = []
+    for field, value in parsed.items():
+        if field in _ENROLLMENT_SURVEY_FIELDS:
+            # Type coercions for integer fields
+            if field in ("confidence_after", "recommend_score", "transformational_score", "delivered_on_promise_score"):
+                try:
+                    value = int(value)
+                except (ValueError, TypeError):
+                    continue
+            setattr(enrollment, field, value)
+            updated_fields.append(field)
+
+    # Set survey metadata
+    enrollment.survey_response_type = "completion"
+    submitted_at = form_response.get("submitted_at")
+    if submitted_at:
+        try:
+            enrollment.survey_submit_date = datetime.fromisoformat(
+                submitted_at.replace("Z", "+00:00")
+            )
+        except (ValueError, TypeError):
+            pass
+
+    db.commit()
+    logger.info("Completion survey saved for enrollment %s: %s", enrollment.enrollment_id, updated_fields)
+
+    return {
+        "status": "survey_saved",
+        "enrollment_id": enrollment.enrollment_id,
+        "updated_fields": updated_fields,
+    }

@@ -17,6 +17,9 @@ class Product(Base):
     typeform_form_id = Column(String, nullable=True)
     typeform_field_map = Column(Text, nullable=True)
     deferred_optin_form_id = Column(String, nullable=True)
+    completion_survey_form_id = Column(String, nullable=True)
+    completion_survey_field_map = Column(Text, nullable=True)
+    kit_onboarded_tag = Column(String, nullable=True)
 
     enrollments = relationship("Enrollment", back_populates="product")
     sales = relationship("Sale", back_populates="product")

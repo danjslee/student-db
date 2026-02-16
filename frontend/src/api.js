@@ -97,6 +97,12 @@ export async function fetchOverview(year) {
   return res.json();
 }
 
+export async function fetchPurchaseTimeline() {
+  const res = await fetch(`${BASE_URL}/analytics/purchase-timeline`);
+  if (!res.ok) throw new Error(`Failed to fetch purchase timeline: ${res.status}`);
+  return res.json();
+}
+
 // ── Analytics — Distributions (support product_ids) ──────
 
 function _analyticsUrl(path, productIds) {

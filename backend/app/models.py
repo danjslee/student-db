@@ -20,6 +20,8 @@ class Product(Base):
     completion_survey_form_id = Column(String, nullable=True)
     completion_survey_field_map = Column(Text, nullable=True)
     kit_onboarded_tag = Column(String, nullable=True)
+    course_start_date = Column(Date, nullable=True)
+    sales_target = Column(Integer, nullable=True)
 
     enrollments = relationship("Enrollment", back_populates="product")
     sales = relationship("Sale", back_populates="product")

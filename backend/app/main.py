@@ -37,6 +37,8 @@ _add_column_if_missing("products", "deferred_optin_form_id", "TEXT")
 _add_column_if_missing("products", "completion_survey_form_id", "TEXT")
 _add_column_if_missing("products", "completion_survey_field_map", "TEXT")
 _add_column_if_missing("products", "kit_onboarded_tag", "TEXT")
+_add_column_if_missing("products", "course_start_date", "DATE")
+_add_column_if_missing("products", "sales_target", "INTEGER")
 
 app = FastAPI(title="Every Student Database", version="1.0.0")
 

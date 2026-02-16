@@ -16,6 +16,8 @@ class ProductBase(BaseModel):
     completion_survey_form_id: Optional[str] = None
     completion_survey_field_map: Optional[str] = None
     kit_onboarded_tag: Optional[str] = None
+    course_start_date: Optional[date] = None
+    sales_target: Optional[int] = None
 
 
 class ProductCreate(ProductBase):
@@ -33,6 +35,8 @@ class ProductUpdate(BaseModel):
     completion_survey_form_id: Optional[str] = None
     completion_survey_field_map: Optional[str] = None
     kit_onboarded_tag: Optional[str] = None
+    course_start_date: Optional[date] = None
+    sales_target: Optional[int] = None
 
 
 class ProductRead(ProductBase):

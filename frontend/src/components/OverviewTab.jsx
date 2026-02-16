@@ -6,6 +6,7 @@ import NpsTrendChart from "./overview/NpsTrendChart";
 import RevenueChart from "./overview/RevenueChart";
 import EnrollmentsChart from "./overview/EnrollmentsChart";
 import ScholarshipsChart from "./overview/ScholarshipsChart";
+import PurchaseTimelineChart from "./overview/PurchaseTimelineChart";
 
 const YEARS = [
   { id: "all", label: "All" },
@@ -65,6 +66,7 @@ export default function OverviewTab() {
         <>
           <KpiCards data={data} />
           <div className="charts-grid">
+            <PurchaseTimelineChart />
             <RevenueChart courses={data.courses} />
             <EnrollmentsChart courses={data.courses} />
             <NpsTrendChart courses={data.courses} />

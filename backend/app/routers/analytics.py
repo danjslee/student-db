@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 from typing import List, Optional
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
@@ -189,6 +189,192 @@ def overview(
         "nps": overall_nps,
         "courses": courses,
     }
+
+
+# ── Purchase Timeline ─────────────────────────────────────
+
+def _build_benchmark_curve(db: Session) -> dict:
+    """Build a benchmark curve from the first completed course (ccfb).
+
+    Returns dict mapping days_before -> cumulative_pct (0-100).
+    Used to forecast sales for upcoming courses.
+    """
+    # Find the first product with a past course_start_date (= completed course)
+    today = date.today()
+    completed = (
+        db.query(Product)
+        .filter(Product.course_start_date.isnot(None), Product.course_start_date < today)
+        .order_by(Product.course_start_date)
+        .first()
+    )
+    if not completed:
+        return {}
+
+    start_date = completed.course_start_date
+    if isinstance(start_date, datetime):
+        start_date = start_date.date()
+
+    sales = (
+        db.query(Sale)
+        .filter(
+            Sale.product_id == completed.id,
+            Sale.status != "refunded",
+            Sale.purchase_date.isnot(None),
+        )
+        .all()
+    )
+    if not sales:
+        return {}
+
+    total = len(sales)
+    daily = {}
+    for s in sales:
+        pdate = s.purchase_date.date() if isinstance(s.purchase_date, datetime) else s.purchase_date
+        d = (start_date - pdate).days
+        daily[d] = daily.get(d, 0) + 1
+
+    # Build cumulative pct curve (from earliest to latest)
+    curve = {}
+    cumul = 0
+    for d in sorted(daily.keys(), reverse=True):
+        cumul += daily[d]
+        curve[d] = round(cumul / total * 100, 2)
+
+    return curve
+
+
+@router.get("/purchase-timeline")
+def purchase_timeline(
+    db: Session = Depends(get_db),
+):
+    """Purchase timeline with forecast based on historical benchmark."""
+    products = db.query(Product).filter(Product.course_start_date.isnot(None)).all()
+    if not products:
+        return []
+
+    today = date.today()
+    benchmark = _build_benchmark_curve(db)
+
+    result = []
+    for product in products:
+        start_date = product.course_start_date
+        if isinstance(start_date, datetime):
+            start_date = start_date.date()
+
+        sales = (
+            db.query(Sale)
+            .filter(
+                Sale.product_id == product.id,
+                Sale.status != "refunded",
+                Sale.purchase_date.isnot(None),
+            )
+            .order_by(Sale.purchase_date)
+            .all()
+        )
+        if not sales:
+            continue
+
+        total_sales = len(sales)
+        total_rev = sum(s.amount_cents or 0 for s in sales)
+        avg_price = total_rev / total_sales if total_sales else 0
+
+        # Build daily cumulative data
+        daily = {}
+        for s in sales:
+            pdate = s.purchase_date.date() if isinstance(s.purchase_date, datetime) else s.purchase_date
+            days_before = (start_date - pdate).days
+            if days_before not in daily:
+                daily[days_before] = {"count": 0, "revenue_cents": 0}
+            daily[days_before]["count"] += 1
+            daily[days_before]["revenue_cents"] += s.amount_cents or 0
+
+        # Build actual cumulative series
+        sorted_days = sorted(daily.keys(), reverse=True)
+        cumulative = 0
+        cumulative_rev = 0
+        actual_series = []
+        for d in sorted_days:
+            cumulative += daily[d]["count"]
+            cumulative_rev += daily[d]["revenue_cents"]
+            actual_series.append({
+                "days_before": d,
+                "date": str(start_date - timedelta(days=d)),
+                "new_sales": daily[d]["count"],
+                "cumulative": cumulative,
+                "revenue_cents": daily[d]["revenue_cents"],
+                "cumulative_revenue_cents": cumulative_rev,
+            })
+
+        # Forecast for upcoming courses
+        days_until_start = (start_date - today).days
+        is_upcoming = days_until_start > 0
+        forecast_series = []
+        forecast_total_sales = None
+        forecast_total_revenue = None
+        rating = None
+
+        if is_upcoming and benchmark and total_sales > 0:
+            # Find where we are on the benchmark curve
+            # Get benchmark pct at current days_until_start
+            bench_pct_now = 0
+            for d in sorted(benchmark.keys(), reverse=True):
+                if d >= days_until_start:
+                    bench_pct_now = benchmark[d]
+            # If no benchmark data at this point, use the lowest available
+            if bench_pct_now == 0:
+                bench_pct_now = min(benchmark.values()) if benchmark else 1
+
+            # Projected total = current_sales / (bench_pct_now / 100)
+            projected_total = round(total_sales / (bench_pct_now / 100))
+            forecast_total_sales = projected_total
+            forecast_total_revenue = round(projected_total * avg_price)
+
+            # Build forecast curve from today to course start
+            for d in sorted(benchmark.keys(), reverse=True):
+                if d < days_until_start:
+                    projected_at_d = round(projected_total * benchmark[d] / 100)
+                    forecast_series.append({
+                        "days_before": d,
+                        "date": str(start_date - timedelta(days=d)),
+                        "cumulative": projected_at_d,
+                    })
+
+            # Rating vs target
+            target = product.sales_target
+            if target and forecast_total_sales:
+                pct_of_target = forecast_total_sales / target * 100
+                if pct_of_target >= 80:
+                    rating = "green"
+                elif pct_of_target >= 50:
+                    rating = "yellow"
+                else:
+                    rating = "red"
+
+        days_list = sorted([
+            (start_date - (s.purchase_date.date() if isinstance(s.purchase_date, datetime) else s.purchase_date)).days
+            for s in sales
+        ])
+
+        result.append({
+            "product_id": product.id,
+            "product_name": product.product_name,
+            "product_slug": product.product_id,
+            "course_start_date": str(start_date),
+            "is_upcoming": is_upcoming,
+            "days_until_start": (start_date - today).days,
+            "total_sales": total_sales,
+            "total_revenue_cents": total_rev,
+            "avg_price_cents": round(avg_price),
+            "sales_target": product.sales_target,
+            "forecast_total_sales": forecast_total_sales,
+            "forecast_total_revenue_cents": forecast_total_revenue,
+            "rating": rating,
+            "median_days_before": days_list[len(days_list) // 2] if days_list else None,
+            "actual_series": actual_series,
+            "forecast_series": forecast_series,
+        })
+
+    return result
 
 
 # ── Existing endpoints (updated with product_ids support) ─

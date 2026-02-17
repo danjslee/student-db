@@ -20,6 +20,7 @@ class Product(Base):
     completion_survey_form_id = Column(String, nullable=True)
     completion_survey_field_map = Column(Text, nullable=True)
     kit_onboarded_tag = Column(String, nullable=True)
+    kit_rsvp_tag = Column(String, nullable=True)
     course_start_date = Column(Date, nullable=True)
     sales_target = Column(Integer, nullable=True)
 
@@ -114,3 +115,31 @@ class Sale(Base):
 
     product = relationship("Product", back_populates="sales")
     enrollments = relationship("Enrollment", back_populates="sale")
+
+
+class ScholarshipApplication(Base):
+    __tablename__ = "scholarship_applications"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, nullable=False)
+    first_name = Column(String, nullable=True)
+    last_name = Column(String, nullable=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    is_subscriber = Column(Boolean, nullable=True)
+    amount_willing_to_pay = Column(Text, nullable=True)
+    circumstances = Column(Text, nullable=True)
+    hopes = Column(Text, nullable=True)
+    best_case_impact = Column(Text, nullable=True)
+    ai_recommendation = Column(Text, nullable=True)
+    ai_recommended_tier = Column(Integer, nullable=True)
+    status = Column(String, default="pending")  # pending/accepted/rejected/withdrawn
+    decision_tier = Column(Integer, nullable=True)
+    discount_code = Column(Text, nullable=True)
+    decision_notes = Column(Text, nullable=True)
+    applied_at = Column(DateTime, nullable=True)
+    decided_at = Column(DateTime, nullable=True)
+    enrolled = Column(Boolean, default=False)
+    kit_delivered = Column(Boolean, default=False)
+    kit_delivered_at = Column(DateTime, nullable=True)
+
+    product = relationship("Product")

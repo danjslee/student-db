@@ -16,6 +16,7 @@ class ProductBase(BaseModel):
     completion_survey_form_id: Optional[str] = None
     completion_survey_field_map: Optional[str] = None
     kit_onboarded_tag: Optional[str] = None
+    kit_rsvp_tag: Optional[str] = None
     course_start_date: Optional[date] = None
     sales_target: Optional[int] = None
 
@@ -35,6 +36,7 @@ class ProductUpdate(BaseModel):
     completion_survey_form_id: Optional[str] = None
     completion_survey_field_map: Optional[str] = None
     kit_onboarded_tag: Optional[str] = None
+    kit_rsvp_tag: Optional[str] = None
     course_start_date: Optional[date] = None
     sales_target: Optional[int] = None
 
@@ -308,5 +310,51 @@ class SaleCSVImportResult(BaseModel):
     skipped: int
     linked: int
     errors: List[str] = []
+
+
+# ---------- Scholarship ----------
+
+class ScholarshipApplicationRead(BaseModel):
+    id: int
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    product_id: Optional[int] = None
+    product_name: Optional[str] = None
+    is_subscriber: Optional[bool] = None
+    amount_willing_to_pay: Optional[str] = None
+    circumstances: Optional[str] = None
+    hopes: Optional[str] = None
+    best_case_impact: Optional[str] = None
+    ai_recommendation: Optional[str] = None
+    ai_recommended_tier: Optional[int] = None
+    status: Optional[str] = "pending"
+    decision_tier: Optional[int] = None
+    discount_code: Optional[str] = None
+    decision_notes: Optional[str] = None
+    applied_at: Optional[datetime] = None
+    decided_at: Optional[datetime] = None
+    enrolled: bool = False
+    kit_delivered: bool = False
+    kit_delivered_at: Optional[datetime] = None
+
+    model_config = {"from_attributes": True}
+
+
+class ScholarshipDecision(BaseModel):
+    status: str  # accepted/rejected/withdrawn
+    decision_tier: Optional[int] = None
+    discount_code: Optional[str] = None
+    decision_notes: Optional[str] = None
+
+
+class ScholarshipAIAssessment(BaseModel):
+    ai_recommendation: str
+    ai_recommended_tier: int
+
+
+class ScholarshipListFilter(BaseModel):
+    status: Optional[str] = None
+    product_id: Optional[int] = None
 
 

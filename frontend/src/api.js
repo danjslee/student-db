@@ -264,6 +264,21 @@ export async function importSalesCSV(productId, file) {
   return res.json();
 }
 
+// ── Scholarships ────────────────────────────────────────
+
+export async function fetchScholarshipApplications({ status, product_id } = {}) {
+  const body = {};
+  if (status) body.status = status;
+  if (product_id) body.product_id = parseInt(product_id, 10);
+  const res = await fetch(`${BASE_URL}/scholarship-applications`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`Failed to fetch scholarship applications: ${res.status}`);
+  return res.json();
+}
+
 // ── Chat ─────────────────────────────────────────────────
 
 export async function sendChatMessage(messages) {

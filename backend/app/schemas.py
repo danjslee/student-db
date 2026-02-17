@@ -358,3 +358,16 @@ class ScholarshipListFilter(BaseModel):
     product_id: Optional[int] = None
 
 
+class ScholarshipApplicationCreate(BaseModel):
+    email: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    product_id: Optional[int] = None
+    is_subscriber: Optional[bool] = None
+    amount_willing_to_pay: Optional[str] = None
+    circumstances: Optional[str] = None
+    hopes: Optional[str] = None
+    best_case_impact: Optional[str] = None
+    applied_at: Optional[str] = None
+
+

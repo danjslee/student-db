@@ -506,6 +506,131 @@ def _verify_typeform_signature(payload: bytes, sig_header: str, secret: str) -> 
         return False
 
 
+# ---------------------------------------------------------------------------
+# 4a. Scholarship application — shared Typeform (not per-product)
+#     MUST be defined before /typeform/{product_id} to avoid wildcard capture
+# ---------------------------------------------------------------------------
+
+# Hardcoded Typeform field IDs for the scholarship form (BlmrafcZ)
+_SCHOLARSHIP_FIELD_MAP = {
+    "BDW3qHqGK2jN": "contact_info",
+    "tL7F7QZoBHNt": "is_subscriber",
+    "AKZmKw95FZnv": "course_name",
+    "qkEtJzfrekMw": "amount_willing_to_pay",
+    "tSu0EbTN0f3n": "circumstances",
+    "cr4NgV8ICSTY": "hopes",
+    "G18vXstzfsDw": "best_case_impact",
+}
+
+
+def _fuzzy_match_product(course_name: str, db: Session) -> Optional[Product]:
+    """Match a course dropdown label to a Product. Tries exact, then substring.
+    Prefers products with an active kit_tag (i.e. currently selling)."""
+    if not course_name:
+        return None
+    clean = course_name.strip().lower()
+    product = db.query(Product).filter(func.lower(Product.product_name) == clean).first()
+    if product:
+        return product
+    # Substring match — collect all matches, prefer ones with kit_tag (active)
+    matches = []
+    for p in db.query(Product).all():
+        if clean in p.product_name.lower() or p.product_name.lower() in clean:
+            matches.append(p)
+    if not matches:
+        return None
+    # Prefer active products (have kit_tag), then highest id (newest)
+    matches.sort(key=lambda p: (bool(p.kit_tag), p.id), reverse=True)
+    return matches[0]
+
+
+@router.post("/typeform/scholarship")
+async def typeform_scholarship(request: Request, db: Session = Depends(get_db)):
+    """
+    Scholarship application webhook (shared form, not per-product).
+    URL: /api/webhook/typeform/scholarship
+    """
+    body = await request.body()
+
+    if TYPEFORM_WEBHOOK_SECRET:
+        sig_header = request.headers.get("Typeform-Signature", "")
+        if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
+            raise HTTPException(401, "Invalid Typeform signature")
+
+    payload = json.loads(body)
+
+    event_type = payload.get("event_type")
+    if event_type != "form_response":
+        return {"status": "ignored", "event_type": event_type}
+
+    form_response = payload.get("form_response", {})
+    answers = form_response.get("answers", [])
+
+    parsed = {}  # type: Dict[str, Any]
+    for answer in answers:
+        field_id = answer.get("field", {}).get("id", "")
+        mapped = _SCHOLARSHIP_FIELD_MAP.get(field_id)
+        if not mapped:
+            continue
+
+        if mapped == "contact_info":
+            ci = answer.get("contact_info") or answer.get("contacts") or {}
+            parsed["first_name"] = ci.get("first_name", "")
+            parsed["last_name"] = ci.get("last_name", "")
+            parsed["email"] = ci.get("email", "")
+        elif mapped == "is_subscriber":
+            parsed["is_subscriber"] = answer.get("boolean", False)
+        elif mapped == "course_name":
+            parsed["course_name"] = _extract_typeform_answer(answer)
+        else:
+            parsed[mapped] = _extract_typeform_answer(answer)
+
+    email = (parsed.get("email") or "").lower().strip()
+    if not email:
+        raise HTTPException(400, "No email found in scholarship application")
+
+    product = _fuzzy_match_product(parsed.get("course_name", ""), db)
+
+    submitted_at = form_response.get("submitted_at")
+    applied_at = None
+    if submitted_at:
+        try:
+            applied_at = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            applied_at = datetime.utcnow()
+
+    app = ScholarshipApplication(
+        email=email,
+        first_name=parsed.get("first_name", ""),
+        last_name=parsed.get("last_name", ""),
+        product_id=product.id if product else None,
+        is_subscriber=parsed.get("is_subscriber"),
+        amount_willing_to_pay=parsed.get("amount_willing_to_pay"),
+        circumstances=parsed.get("circumstances"),
+        hopes=parsed.get("hopes"),
+        best_case_impact=parsed.get("best_case_impact"),
+        status="pending",
+        applied_at=applied_at or datetime.utcnow(),
+    )
+    db.add(app)
+    db.commit()
+
+    logger.info(
+        "Scholarship application #%d from %s for %s",
+        app.id, email, product.product_name if product else "unknown course",
+    )
+    return {
+        "status": "application_received",
+        "id": app.id,
+        "email": email,
+        "product": product.product_name if product else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# 4b. Typeform — form_response submitted (per-product)
+# ---------------------------------------------------------------------------
+
 @router.post("/typeform/{product_id}")
 async def typeform_submission(
     product_id: str, request: Request, db: Session = Depends(get_db),
@@ -539,12 +664,15 @@ async def typeform_submission(
     if not product:
         raise HTTPException(404, f"No product with product_id '{product_id}'")
 
-    # Optionally validate form_id
+    # Optionally validate form_id (accept onboarding OR deferred opt-in form)
     form_id = form_response.get("form_id")
-    if product.typeform_form_id and form_id != product.typeform_form_id:
+    allowed_form_ids = set(
+        fid for fid in [product.typeform_form_id, product.deferred_optin_form_id] if fid
+    )
+    if allowed_form_ids and form_id not in allowed_form_ids:
         raise HTTPException(
             400,
-            f"Form ID mismatch: expected {product.typeform_form_id}, got {form_id}",
+            f"Form ID mismatch: expected one of {allowed_form_ids}, got {form_id}",
         )
 
     # Parse field map from product config
@@ -764,124 +892,4 @@ async def typeform_completion_survey(
         "status": "survey_saved",
         "enrollment_id": enrollment.enrollment_id,
         "updated_fields": updated_fields,
-    }
-
-
-# ---------------------------------------------------------------------------
-# 6. Scholarship application — shared Typeform (not per-product)
-# ---------------------------------------------------------------------------
-
-# Hardcoded Typeform field IDs for the scholarship form (BlmrafcZ)
-_SCHOLARSHIP_FIELD_MAP = {
-    "BDW3qHqGK2jN": "contact_info",
-    "tL7F7QZoBHNt": "is_subscriber",
-    "AKZmKw95FZnv": "course_name",
-    "qkEtJzfrekMw": "amount_willing_to_pay",
-    "tSu0EbTN0f3n": "circumstances",
-    "cr4NgV8ICSTY": "hopes",
-    "G18vXstzfsDw": "best_case_impact",
-}
-
-
-def _fuzzy_match_product(course_name: str, db: Session) -> Optional[Product]:
-    """Match a course dropdown label to a Product. Tries exact, then substring."""
-    if not course_name:
-        return None
-    clean = course_name.strip().lower()
-    # Try exact match on product_name
-    product = db.query(Product).filter(func.lower(Product.product_name) == clean).first()
-    if product:
-        return product
-    # Try substring match
-    for p in db.query(Product).all():
-        if clean in p.product_name.lower() or p.product_name.lower() in clean:
-            return p
-    return None
-
-
-@router.post("/typeform/scholarship")
-async def typeform_scholarship(request: Request, db: Session = Depends(get_db)):
-    """
-    Scholarship application webhook (shared form, not per-product).
-    URL: /api/webhook/typeform/scholarship
-    """
-    body = await request.body()
-
-    if TYPEFORM_WEBHOOK_SECRET:
-        sig_header = request.headers.get("Typeform-Signature", "")
-        if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
-            raise HTTPException(401, "Invalid Typeform signature")
-
-    payload = json.loads(body)
-
-    event_type = payload.get("event_type")
-    if event_type != "form_response":
-        return {"status": "ignored", "event_type": event_type}
-
-    form_response = payload.get("form_response", {})
-    answers = form_response.get("answers", [])
-
-    # Parse scholarship-specific fields
-    parsed = {}  # type: Dict[str, Any]
-    for answer in answers:
-        field_id = answer.get("field", {}).get("id", "")
-        mapped = _SCHOLARSHIP_FIELD_MAP.get(field_id)
-        if not mapped:
-            continue
-
-        if mapped == "contact_info":
-            # Nested contact_info — extract from the answer's sub-fields
-            # Typeform contact_info has: first_name, last_name, email as direct keys
-            ci = answer.get("contact_info") or answer.get("contacts") or {}
-            parsed["first_name"] = ci.get("first_name", "")
-            parsed["last_name"] = ci.get("last_name", "")
-            parsed["email"] = ci.get("email", "")
-        elif mapped == "is_subscriber":
-            parsed["is_subscriber"] = answer.get("boolean", False)
-        elif mapped == "course_name":
-            parsed["course_name"] = _extract_typeform_answer(answer)
-        else:
-            parsed[mapped] = _extract_typeform_answer(answer)
-
-    email = (parsed.get("email") or "").lower().strip()
-    if not email:
-        raise HTTPException(400, "No email found in scholarship application")
-
-    # Resolve course → product
-    product = _fuzzy_match_product(parsed.get("course_name", ""), db)
-
-    # Get submitted_at
-    submitted_at = form_response.get("submitted_at")
-    applied_at = None
-    if submitted_at:
-        try:
-            applied_at = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            applied_at = datetime.utcnow()
-
-    app = ScholarshipApplication(
-        email=email,
-        first_name=parsed.get("first_name", ""),
-        last_name=parsed.get("last_name", ""),
-        product_id=product.id if product else None,
-        is_subscriber=parsed.get("is_subscriber"),
-        amount_willing_to_pay=parsed.get("amount_willing_to_pay"),
-        circumstances=parsed.get("circumstances"),
-        hopes=parsed.get("hopes"),
-        best_case_impact=parsed.get("best_case_impact"),
-        status="pending",
-        applied_at=applied_at or datetime.utcnow(),
-    )
-    db.add(app)
-    db.commit()
-
-    logger.info(
-        "Scholarship application #%d from %s for %s",
-        app.id, email, product.product_name if product else "unknown course",
-    )
-    return {
-        "status": "application_received",
-        "id": app.id,
-        "email": email,
-        "product": product.product_name if product else None,
     }

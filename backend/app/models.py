@@ -141,5 +141,6 @@ class ScholarshipApplication(Base):
     enrolled = Column(Boolean, default=False)
     kit_delivered = Column(Boolean, default=False)
     kit_delivered_at = Column(DateTime, nullable=True)
+    processing_status = Column(String, default="new")  # new/processed/manual
 
     product = relationship("Product")

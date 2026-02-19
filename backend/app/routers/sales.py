@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
 from sqlalchemy.orm import Session, joinedload
 
 from app.database import get_db
-from app.models import Sale, Product, Enrollment
+from app.models import Sale, Product, Enrollment, ScholarshipApplication
 from app.schemas import SaleCreate, SaleUpdate, SaleRead, SaleCSVImportResult
 
 logger = logging.getLogger(__name__)
@@ -88,6 +88,80 @@ def delete_sale(sale_id: int, db: Session = Depends(get_db)):
         raise HTTPException(404, "Sale not found")
     db.delete(sale)
     db.commit()
+
+
+def _reconcile_scholarships(db: Session, product_id: int) -> dict:
+    """
+    Cross-reference accepted scholarship applications with sales for a product.
+    Sets Sale.scholarship=1 and ScholarshipApplication.enrolled=True where matched.
+    Returns summary of changes.
+    """
+    from sqlalchemy import func as sqlfunc
+
+    apps = (
+        db.query(ScholarshipApplication)
+        .filter(
+            ScholarshipApplication.product_id == product_id,
+            ScholarshipApplication.status == "accepted",
+        )
+        .all()
+    )
+    if not apps:
+        return {"matched": 0, "already_matched": 0}
+
+    # Build lookup: lowercase email → app
+    app_by_email = {a.email.lower().strip(): a for a in apps}
+
+    sales = (
+        db.query(Sale)
+        .filter(Sale.product_id == product_id, Sale.status == "completed")
+        .all()
+    )
+
+    matched = 0
+    already_matched = 0
+    for sale in sales:
+        email = (sale.buyer_email or "").lower().strip()
+        app = app_by_email.get(email)
+        if not app:
+            continue
+        if sale.scholarship == 1 and app.enrolled:
+            already_matched += 1
+            continue
+        sale.scholarship = 1
+        app.enrolled = True
+        matched += 1
+        logger.info("Scholarship reconciled: sale #%d ↔ app #%d (%s)", sale.id, app.id, email)
+
+    if matched:
+        db.commit()
+    return {"matched": matched, "already_matched": already_matched}
+
+
+@router.post("/reconcile-scholarships")
+def reconcile_scholarships(
+    product_id: Optional[int] = Query(None, description="Numeric product ID (omit for all products)"),
+    db: Session = Depends(get_db),
+):
+    """
+    Reconcile scholarship applications with sales.
+    Cross-references accepted scholarship apps against existing sales and sets
+    the scholarship flag + enrolled status where they match.
+    """
+    if product_id:
+        products = [db.query(Product).filter(Product.id == product_id).first()]
+        if not products[0]:
+            raise HTTPException(404, "Product not found")
+    else:
+        products = db.query(Product).all()
+
+    results = {}
+    for p in products:
+        result = _reconcile_scholarships(db, p.id)
+        if result["matched"] or result["already_matched"]:
+            results[p.product_id] = result
+
+    return {"reconciled": results}
 
 
 def _parse_price(price_str: str) -> int:
@@ -222,8 +296,11 @@ async def import_sales_csv(
             errors.append(f"Row {i}: {str(e)}")
 
     db.commit()
+
+    # Auto-reconcile scholarships after CSV import
+    reconciled = _reconcile_scholarships(db, product.id)
     logger.info(
-        "CSV import for %s: created=%d skipped=%d linked=%d errors=%d",
-        product_id, created, skipped, linked, len(errors),
+        "CSV import for %s: created=%d skipped=%d linked=%d errors=%d scholarships_matched=%d",
+        product_id, created, skipped, linked, len(errors), reconciled["matched"],
     )
     return SaleCSVImportResult(created=created, skipped=skipped, linked=linked, errors=errors)

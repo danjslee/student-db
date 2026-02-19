@@ -148,6 +148,7 @@ def mark_kit_delivered(
 
     app.kit_delivered = True
     app.kit_delivered_at = datetime.utcnow()
+    app.processing_status = "processed"
     db.commit()
 
     logger.info("Scholarship #%d Kit delivered", app_id)

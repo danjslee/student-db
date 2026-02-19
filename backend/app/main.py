@@ -40,6 +40,7 @@ _add_column_if_missing("products", "kit_onboarded_tag", "TEXT")
 _add_column_if_missing("products", "kit_rsvp_tag", "TEXT")
 _add_column_if_missing("products", "course_start_date", "DATE")
 _add_column_if_missing("products", "sales_target", "INTEGER")
+_add_column_if_missing("scholarship_applications", "processing_status", "TEXT DEFAULT 'new'")
 
 app = FastAPI(title="Every Student Database", version="1.0.0")
 

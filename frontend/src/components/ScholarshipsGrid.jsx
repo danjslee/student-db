@@ -5,7 +5,7 @@ import { fetchScholarshipApplications, fetchProducts } from "../api";
 
 const STATUS_OPTIONS = ["", "pending", "accepted", "rejected", "withdrawn"];
 
-function StatusCellRenderer(params) {
+function DecisionCellRenderer(params) {
   const v = params.value || "";
   const colors = {
     pending: "#f59e0b",
@@ -16,6 +16,25 @@ function StatusCellRenderer(params) {
   return (
     <span style={{ color: colors[v] || "#d6d3d1", fontWeight: 600 }}>
       {v || "—"}
+    </span>
+  );
+}
+
+function ProcessingStatusRenderer(params) {
+  const v = params.value || "new";
+  const colors = {
+    processed: "#22c55e",
+    new: "#f59e0b",
+    manual: "#3b82f6",
+  };
+  const labels = {
+    processed: "Processed",
+    new: "New",
+    manual: "Manual",
+  };
+  return (
+    <span style={{ color: colors[v] || "#d6d3d1", fontWeight: 600 }}>
+      {labels[v] || v}
     </span>
   );
 }
@@ -63,10 +82,17 @@ export default function ScholarshipsGrid() {
       { field: "amount_willing_to_pay", headerName: "Can Pay", width: 90, editable: false },
       {
         field: "status",
+        headerName: "Decision",
+        width: 100,
+        editable: false,
+        cellRenderer: DecisionCellRenderer,
+      },
+      {
+        field: "processing_status",
         headerName: "Status",
         width: 100,
         editable: false,
-        cellRenderer: StatusCellRenderer,
+        cellRenderer: ProcessingStatusRenderer,
       },
       {
         field: "ai_recommended_tier",
@@ -137,7 +163,7 @@ export default function ScholarshipsGrid() {
     <div className="grid-container">
       <div className="insights-toolbar" style={{ gap: "12px" }}>
         <div>
-          <label htmlFor="schol-status-filter">Status:</label>
+          <label htmlFor="schol-status-filter">Decision:</label>
           <select
             id="schol-status-filter"
             value={selectedStatus}

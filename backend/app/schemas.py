@@ -337,6 +337,7 @@ class ScholarshipApplicationRead(BaseModel):
     enrolled: bool = False
     kit_delivered: bool = False
     kit_delivered_at: Optional[datetime] = None
+    processing_status: Optional[str] = "new"
 
     model_config = {"from_attributes": True}
 

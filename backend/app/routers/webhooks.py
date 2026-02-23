@@ -25,6 +25,7 @@ KIT_WEBHOOK_SECRET = os.getenv("KIT_WEBHOOK_SECRET", "")
 KIT_API_KEY = os.getenv("KIT_API_KEY", "")
 STRIPE_WEBHOOK_SECRET = os.getenv("STRIPE_WEBHOOK_SECRET", "")
 TYPEFORM_WEBHOOK_SECRET = os.getenv("TYPEFORM_WEBHOOK_SECRET", "")
+CIRCLE_API_TOKEN = os.getenv("CIRCLE_API_TOKEN", "")
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +84,7 @@ def _create_enrollment(
         student_id=student.id,
         product_id=product.id,
         sale_id=sale_id,
+        kit_tag_pending=bool(product.kit_rsvp_tag),
     )
     db.add(enrollment)
     db.commit()
@@ -93,6 +95,25 @@ def _create_enrollment(
     kit_rsvp_tagged = False
     if product.kit_rsvp_tag:
         kit_rsvp_tagged = kit_tag_subscriber_by_email(student.email, product.kit_rsvp_tag)
+        if kit_rsvp_tagged:
+            enrollment.kit_tag_pending = False
+            db.commit()
+            logger.info("Kit RSVP tag applied for %s — cleared kit_tag_pending", enrollment_id)
+        else:
+            logger.error(
+                "Kit RSVP tagging FAILED for enrollment %s (email=%s, tag=%s) — kit_tag_pending=True",
+                enrollment_id, student.email, product.kit_rsvp_tag,
+            )
+
+    # Invite to Circle community + add to access group if configured
+    circle_invited = False
+    circle_access_group_added = False
+    if product.circle_access_group_id:
+        circle_invited = circle_invite_member(student.email)
+        if circle_invited:
+            circle_access_group_added = circle_add_to_access_group(
+                student.email, product.circle_access_group_id
+            )
 
     result = {
         "status": "enrolled",
@@ -102,6 +123,10 @@ def _create_enrollment(
     }
     if product.kit_rsvp_tag:
         result["kit_rsvp_tagged"] = kit_rsvp_tagged
+        result["kit_tag_pending"] = enrollment.kit_tag_pending
+    if product.circle_access_group_id:
+        result["circle_invited"] = circle_invited
+        result["circle_access_group_added"] = circle_access_group_added
     return result
 
 
@@ -185,6 +210,59 @@ def kit_tag_subscriber_by_email(email: str, tag_name: str) -> bool:
     if success:
         logger.info("Kit: tagged %s with '%s'", email, tag_name)
     return success
+
+
+# ---------------------------------------------------------------------------
+# Circle API helpers — invite members + manage access groups
+# ---------------------------------------------------------------------------
+
+_CIRCLE_API_BASE = "https://app.circle.so/api/admin/v2"
+
+
+def _circle_api_request(method: str, path: str, body: dict = None) -> Optional[dict]:
+    """Make an authenticated request to Circle API v2. Returns parsed JSON or None on failure."""
+    if not CIRCLE_API_TOKEN:
+        logger.warning("CIRCLE_API_TOKEN not set — skipping Circle API call")
+        return None
+    url = f"{_CIRCLE_API_BASE}{path}"
+    data = json.dumps(body).encode() if body else None
+    req = urllib.request.Request(url, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {CIRCLE_API_TOKEN}")
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return json.loads(resp.read())
+    except urllib.error.HTTPError as e:
+        logger.error("Circle API %s %s → %d: %s", method, path, e.code, e.read().decode()[:200])
+        return None
+    except Exception as e:
+        logger.error("Circle API %s %s failed: %s", method, path, e)
+        return None
+
+
+def circle_invite_member(email: str) -> bool:
+    """Invite a member to the Circle community (no invitation email). Returns True on success."""
+    result = _circle_api_request("POST", "/community_members", {
+        "email": email,
+        "skip_invitation_email": True,
+    })
+    if result:
+        logger.info("Circle: invited %s to community", email)
+        return True
+    return False
+
+
+def circle_add_to_access_group(email: str, access_group_id: int) -> bool:
+    """Add a member to a Circle access group. Returns True on success."""
+    result = _circle_api_request(
+        "POST",
+        f"/access_groups/{access_group_id}/community_members",
+        {"email": email},
+    )
+    if result:
+        logger.info("Circle: added %s to access group %d", email, access_group_id)
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -513,7 +591,10 @@ def _verify_typeform_signature(payload: bytes, sig_header: str, secret: str) -> 
 
 # Hardcoded Typeform field IDs for the scholarship form (BlmrafcZ)
 _SCHOLARSHIP_FIELD_MAP = {
-    "BDW3qHqGK2jN": "contact_info",
+    "BDW3qHqGK2jN": "contact_info",          # legacy composite (unused)
+    "qSYFP8ykCtZz": "first_name",             # separate first name field
+    "vpAw1IPd33cA": "last_name",              # separate last name field
+    "k3UdSjtkWPtO": "email",                  # separate email field
     "tL7F7QZoBHNt": "is_subscriber",
     "AKZmKw95FZnv": "course_name",
     "qkEtJzfrekMw": "amount_willing_to_pay",
@@ -578,6 +659,10 @@ async def typeform_scholarship(request: Request, db: Session = Depends(get_db)):
             parsed["first_name"] = ci.get("first_name", "")
             parsed["last_name"] = ci.get("last_name", "")
             parsed["email"] = ci.get("email", "")
+        elif mapped in ("first_name", "last_name"):
+            parsed[mapped] = _extract_typeform_answer(answer)
+        elif mapped == "email":
+            parsed["email"] = _extract_typeform_answer(answer)
         elif mapped == "is_subscriber":
             parsed["is_subscriber"] = answer.get("boolean", False)
         elif mapped == "course_name":
@@ -739,11 +824,20 @@ async def typeform_submission(
     if product.kit_onboarded_tag:
         kit_tagged = kit_tag_subscriber_by_email(email, product.kit_onboarded_tag)
 
+    # Add to Circle onboarded access group if configured
+    circle_onboarded = False
+    if product.circle_onboarded_access_group_id:
+        circle_onboarded = circle_add_to_access_group(
+            email, product.circle_onboarded_access_group_id
+        )
+
     # Create enrollment as safety net (idempotent — normally student is already enrolled)
     result = _create_enrollment(db, student, product, source="typeform")
     result["enriched_fields"] = updated_fields
     if product.kit_onboarded_tag:
         result["kit_tagged"] = kit_tagged
+    if product.circle_onboarded_access_group_id:
+        result["circle_onboarded"] = circle_onboarded
     return result
 
 
@@ -888,8 +982,18 @@ async def typeform_completion_survey(
     db.commit()
     logger.info("Completion survey saved for enrollment %s: %s", enrollment.enrollment_id, updated_fields)
 
-    return {
+    # Add to Circle offboarded access group if configured
+    circle_offboarded = False
+    if product.circle_offboarded_access_group_id:
+        circle_offboarded = circle_add_to_access_group(
+            clean_email, product.circle_offboarded_access_group_id
+        )
+
+    result = {
         "status": "survey_saved",
         "enrollment_id": enrollment.enrollment_id,
         "updated_fields": updated_fields,
     }
+    if product.circle_offboarded_access_group_id:
+        result["circle_offboarded"] = circle_offboarded
+    return result

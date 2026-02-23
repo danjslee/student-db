@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import logging
+from typing import List
+
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func, desc, case, and_
@@ -7,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.models import Product, Student, Enrollment
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["admin"])
 
@@ -190,6 +195,95 @@ def admin_overview(db: Session = Depends(get_db)):
         "recent_enrollments": recent_list,
         "course_metrics": course_metrics,
     }
+
+
+@router.post("/api/admin/retry-kit-tags")
+def retry_kit_tags(db: Session = Depends(get_db)):
+    """Retry Kit tagging for all enrollments where kit_tag_pending=True."""
+    from app.routers.webhooks import kit_tag_subscriber_by_email
+
+    pending = (
+        db.query(Enrollment)
+        .filter(Enrollment.kit_tag_pending == True)
+        .all()
+    )
+
+    if not pending:
+        return {"status": "nothing_to_retry", "pending_count": 0}
+
+    results = []  # type: List[dict]
+    succeeded = 0
+    failed = 0
+
+    for enrollment in pending:
+        student = db.query(Student).filter(Student.id == enrollment.student_id).first()
+        product = db.query(Product).filter(Product.id == enrollment.product_id).first()
+
+        if not student or not product or not product.kit_rsvp_tag:
+            # No tag configured (product changed?) — clear the flag
+            enrollment.kit_tag_pending = False
+            db.commit()
+            results.append({
+                "enrollment_id": enrollment.enrollment_id,
+                "status": "cleared",
+                "reason": "no kit_rsvp_tag configured on product",
+            })
+            succeeded += 1
+            continue
+
+        tagged = kit_tag_subscriber_by_email(student.email, product.kit_rsvp_tag)
+        if tagged:
+            enrollment.kit_tag_pending = False
+            db.commit()
+            logger.info("Retry succeeded: %s tagged with '%s'", student.email, product.kit_rsvp_tag)
+            results.append({
+                "enrollment_id": enrollment.enrollment_id,
+                "email": student.email,
+                "tag": product.kit_rsvp_tag,
+                "status": "success",
+            })
+            succeeded += 1
+        else:
+            logger.error("Retry failed: %s tag '%s'", student.email, product.kit_rsvp_tag)
+            results.append({
+                "enrollment_id": enrollment.enrollment_id,
+                "email": student.email,
+                "tag": product.kit_rsvp_tag,
+                "status": "failed",
+            })
+            failed += 1
+
+    return {
+        "status": "completed",
+        "total": len(pending),
+        "succeeded": succeeded,
+        "failed": failed,
+        "details": results,
+    }
+
+
+@router.get("/api/admin/pending-kit-tags")
+def pending_kit_tags(db: Session = Depends(get_db)):
+    """List all enrollments with kit_tag_pending=True (for visibility before retrying)."""
+    pending = (
+        db.query(Enrollment)
+        .filter(Enrollment.kit_tag_pending == True)
+        .all()
+    )
+
+    items = []
+    for enrollment in pending:
+        student = db.query(Student).filter(Student.id == enrollment.student_id).first()
+        product = db.query(Product).filter(Product.id == enrollment.product_id).first()
+        items.append({
+            "enrollment_id": enrollment.enrollment_id,
+            "email": student.email if student else "?",
+            "product": product.product_name if product else "?",
+            "kit_rsvp_tag": product.kit_rsvp_tag if product else None,
+            "source": enrollment.source,
+        })
+
+    return {"count": len(items), "enrollments": items}
 
 
 ADMIN_HTML = """<!DOCTYPE html>

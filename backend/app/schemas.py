@@ -19,6 +19,9 @@ class ProductBase(BaseModel):
     kit_rsvp_tag: Optional[str] = None
     course_start_date: Optional[date] = None
     sales_target: Optional[int] = None
+    circle_access_group_id: Optional[int] = None
+    circle_onboarded_access_group_id: Optional[int] = None
+    circle_offboarded_access_group_id: Optional[int] = None
 
 
 class ProductCreate(ProductBase):
@@ -39,6 +42,9 @@ class ProductUpdate(BaseModel):
     kit_rsvp_tag: Optional[str] = None
     course_start_date: Optional[date] = None
     sales_target: Optional[int] = None
+    circle_access_group_id: Optional[int] = None
+    circle_onboarded_access_group_id: Optional[int] = None
+    circle_offboarded_access_group_id: Optional[int] = None
 
 
 class ProductRead(ProductBase):

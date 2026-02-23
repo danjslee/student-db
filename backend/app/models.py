@@ -23,6 +23,9 @@ class Product(Base):
     kit_rsvp_tag = Column(String, nullable=True)
     course_start_date = Column(Date, nullable=True)
     sales_target = Column(Integer, nullable=True)
+    circle_access_group_id = Column(Integer, nullable=True)
+    circle_onboarded_access_group_id = Column(Integer, nullable=True)
+    circle_offboarded_access_group_id = Column(Integer, nullable=True)
 
     enrollments = relationship("Enrollment", back_populates="product")
     sales = relationship("Sale", back_populates="product")
@@ -65,6 +68,7 @@ class Enrollment(Base):
     student_id = Column(Integer, ForeignKey("students.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
     sale_id = Column(Integer, ForeignKey("sales.id"), nullable=True)
+    kit_tag_pending = Column(Boolean, default=False, nullable=False, server_default="0")
 
     student = relationship("Student", back_populates="enrollments")
     product = relationship("Product", back_populates="enrollments")

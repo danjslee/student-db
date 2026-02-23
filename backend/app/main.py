@@ -41,6 +41,10 @@ _add_column_if_missing("products", "kit_rsvp_tag", "TEXT")
 _add_column_if_missing("products", "course_start_date", "DATE")
 _add_column_if_missing("products", "sales_target", "INTEGER")
 _add_column_if_missing("scholarship_applications", "processing_status", "TEXT DEFAULT 'new'")
+_add_column_if_missing("enrollments", "kit_tag_pending", "BOOLEAN DEFAULT 0")
+_add_column_if_missing("products", "circle_access_group_id", "INTEGER")
+_add_column_if_missing("products", "circle_onboarded_access_group_id", "INTEGER")
+_add_column_if_missing("products", "circle_offboarded_access_group_id", "INTEGER")
 
 app = FastAPI(title="Every Student Database", version="1.0.0")
 

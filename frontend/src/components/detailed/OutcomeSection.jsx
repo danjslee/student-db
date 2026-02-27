@@ -58,12 +58,14 @@ export default function OutcomeSection({ productIds }) {
   confAfter.forEach((d) => allLevels.add(d.label));
   const beforeMap = Object.fromEntries(confBefore.map((d) => [d.label, d.count]));
   const afterMap = Object.fromEntries(confAfter.map((d) => [d.label, d.count]));
+  const totalBefore = confBefore.reduce((s, d) => s + d.count, 0);
+  const totalAfter = confAfter.reduce((s, d) => s + d.count, 0);
   const confidenceComparison = [...allLevels]
     .sort((a, b) => parseInt(a) - parseInt(b))
     .map((level) => ({
       label: level,
-      before: beforeMap[level] || 0,
-      after: afterMap[level] || 0,
+      before: totalBefore > 0 ? Math.round(((beforeMap[level] || 0) / totalBefore) * 100) : 0,
+      after: totalAfter > 0 ? Math.round(((afterMap[level] || 0) / totalAfter) * 100) : 0,
     }));
 
   // Calculate NPS score
@@ -88,8 +90,8 @@ export default function OutcomeSection({ productIds }) {
             <BarChart data={confidenceComparison} margin={{ top: 5, right: 20, bottom: 20, left: 10 }}>
               <CartesianGrid {...gridProps} />
               <XAxis dataKey="label" {...axisProps.x} />
-              <YAxis allowDecimals={false} {...axisProps.y} />
-              <Tooltip {...tooltipStyle} />
+              <YAxis allowDecimals={false} {...axisProps.y} tickFormatter={(v) => `${v}%`} />
+              <Tooltip {...tooltipStyle} formatter={(v) => `${v}%`} />
               <Legend
                 wrapperStyle={{ fontSize: 12, color: "#a8a29e" }}
                 iconType="circle"

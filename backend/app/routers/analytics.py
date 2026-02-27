@@ -89,10 +89,15 @@ def overview(
             if not has_students_in_year and not has_sales_in_year:
                 continue
 
-        # ALL enrollments for this product (not filtered by date)
-        enrollments = db.query(Enrollment).filter(
+        # Enrollments for this product, filtered by year if set
+        enrollments_q = db.query(Enrollment).filter(
             Enrollment.product_id == product.id
-        ).all()
+        )
+        if year_int:
+            enrollments_q = enrollments_q.join(Student).filter(
+                extract("year", Student.onboarding_date) == year_int
+            )
+        enrollments = enrollments_q.all()
         enrollment_count = len(enrollments)
         if enrollment_count == 0:
             continue

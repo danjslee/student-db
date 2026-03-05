@@ -279,6 +279,67 @@ export async function fetchScholarshipApplications({ status, product_id } = {}) 
   return res.json();
 }
 
+// ── Broadcasts ─────────────────────────────────────────────
+
+export async function fetchBroadcasts({ status, limit = 200 } = {}) {
+  const params = new URLSearchParams();
+  if (status) params.set("status", status);
+  params.set("limit", limit);
+  const res = await fetch(`${BASE_URL}/broadcasts?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch broadcasts: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchBroadcast(id) {
+  const res = await fetch(`${BASE_URL}/broadcasts/${id}`);
+  if (!res.ok) throw new Error(`Failed to fetch broadcast: ${res.status}`);
+  return res.json();
+}
+
+export async function cancelBroadcast(id) {
+  const res = await fetch(`${BASE_URL}/broadcasts/${id}/cancel`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to cancel broadcast: ${res.status}`);
+  return res.json();
+}
+
+export async function sendBroadcastNow(id) {
+  const res = await fetch(`${BASE_URL}/broadcasts/${id}/send-now`, { method: "POST" });
+  if (!res.ok) throw new Error(`Failed to send broadcast: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchBroadcastSends(broadcastId, { limit = 200 } = {}) {
+  const params = new URLSearchParams();
+  params.set("broadcast_id", broadcastId);
+  params.set("limit", limit);
+  const res = await fetch(`${BASE_URL}/emails/sends?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch sends: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchTriggeredEmails({ limit = 200 } = {}) {
+  const params = new URLSearchParams();
+  params.set("limit", limit);
+  params.set("triggered_only", "true");
+  const res = await fetch(`${BASE_URL}/emails/sends?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch triggered emails: ${res.status}`);
+  return res.json();
+}
+
+// ── Email Sends ─────────────────────────────────────────
+
+export async function fetchEmailSends({ to_email, product_id, email_type, status, limit = 200 } = {}) {
+  const params = new URLSearchParams();
+  if (to_email) params.set("to_email", to_email);
+  if (product_id) params.set("product_id", product_id);
+  if (email_type) params.set("email_type", email_type);
+  if (status) params.set("status", status);
+  params.set("limit", limit);
+  const res = await fetch(`${BASE_URL}/emails/sends?${params}`);
+  if (!res.ok) throw new Error(`Failed to fetch email sends: ${res.status}`);
+  return res.json();
+}
+
 // ── Chat ─────────────────────────────────────────────────
 
 export async function sendChatMessage(messages) {

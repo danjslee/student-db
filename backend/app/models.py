@@ -1,6 +1,6 @@
 from sqlalchemy import (
     Column, Integer, String, Float, Boolean, Date, DateTime, Text,
-    ForeignKey,
+    ForeignKey, UniqueConstraint,
 )
 from sqlalchemy.orm import relationship
 from app.database import Base
@@ -20,6 +20,7 @@ class Product(Base):
     completion_survey_form_id = Column(String, nullable=True)
     completion_survey_field_map = Column(Text, nullable=True)
     kit_onboarded_tag = Column(String, nullable=True)
+    kit_offboarded_tag = Column(String, nullable=True)
     kit_rsvp_tag = Column(String, nullable=True)
     course_start_date = Column(Date, nullable=True)
     sales_target = Column(Integer, nullable=True)
@@ -146,5 +147,92 @@ class ScholarshipApplication(Base):
     kit_delivered = Column(Boolean, default=False)
     kit_delivered_at = Column(DateTime, nullable=True)
     processing_status = Column(String, default="new")  # new/processed/manual
+
+    product = relationship("Product")
+
+
+class WebhookEvent(Base):
+    __tablename__ = "webhook_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, nullable=False)
+    endpoint = Column(String, nullable=False)  # kit/stripe/form/typeform_scholarship/typeform_onboarding/typeform_completion
+    product_id = Column(String, nullable=True)
+    email = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="success")  # success/error/ignored
+    error_message = Column(Text, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    # Downstream action results
+    kit_tagged = Column(Boolean, default=False)
+    circle_invited = Column(Boolean, default=False)
+    circle_access_group_added = Column(Boolean, default=False)
+    enrollment_created = Column(Boolean, default=False)
+    student_created = Column(Boolean, default=False)
+
+    response_summary = Column(Text, nullable=True)  # JSON text, capped at 2000 chars
+
+
+class EmailSend(Base):
+    __tablename__ = "email_sends"
+
+    id = Column(Integer, primary_key=True, index=True)
+    timestamp = Column(DateTime, nullable=False)
+    to_email = Column(String, nullable=False)
+    from_address = Column(String, nullable=False)
+    reply_to = Column(String, nullable=True)
+    subject = Column(String, nullable=False)
+    html_body = Column(Text, nullable=False)
+    client = Column(String, nullable=False)  # every, etc.
+    email_type = Column(String, nullable=False)  # enrollment_confirmation, session_reminder, etc.
+    student_id = Column(Integer, ForeignKey("students.id"), nullable=True)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)
+    dry_run = Column(Boolean, default=True)
+    status = Column(String, nullable=False)  # dry_run, pending, sent, delivered, error
+    broadcast_id = Column(Integer, ForeignKey("scheduled_broadcasts.id"), nullable=True)
+    resend_id = Column(String, nullable=True)
+    sent_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    broadcast = relationship("ScheduledBroadcast", back_populates="sends")
+
+
+class ScheduledBroadcast(Base):
+    __tablename__ = "scheduled_broadcasts"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String, nullable=False)
+    email_type = Column(String, nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
+    client = Column(String, nullable=False, default="every")
+    scheduled_at = Column(DateTime, nullable=False)  # UTC
+    timezone = Column(String, nullable=False, default="America/New_York")
+    status = Column(String, nullable=False, default="pending")  # pending/sending/sent/partial_error/cancelled
+    total_recipients = Column(Integer, nullable=True)
+    sent_count = Column(Integer, default=0)
+    error_count = Column(Integer, default=0)
+    created_at = Column(DateTime, nullable=False)
+    started_at = Column(DateTime, nullable=True)
+    completed_at = Column(DateTime, nullable=True)
+    template_params = Column(Text, nullable=True)  # JSON
+    dry_run = Column(Boolean, default=True)
+    filter_tag = Column(String, nullable=True)
+    error_summary = Column(Text, nullable=True)
+
+    product = relationship("Product")
+    sends = relationship("EmailSend", back_populates="broadcast")
+
+
+class EmailUnsubscribe(Base):
+    __tablename__ = "email_unsubscribes"
+    __table_args__ = (
+        UniqueConstraint("email", "product_id", name="uq_email_product_unsub"),
+    )
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, nullable=False)
+    product_id = Column(Integer, ForeignKey("products.id"), nullable=True)  # NULL = global
+    reason = Column(String, nullable=True)
+    unsubscribed_at = Column(DateTime, nullable=False)
 
     product = relationship("Product")

@@ -1,8 +1,11 @@
 from dotenv import load_dotenv
 load_dotenv()
 
+import asyncio
 import os
+import logging
 import secrets
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -13,7 +16,9 @@ from fastapi.responses import FileResponse
 from sqlalchemy import inspect, text
 
 from app.database import engine, Base
-from app.routers import students, products, enrollments, chat, analytics, webhooks, admin, sales, qualitative, scholarships
+from app.routers import students, products, enrollments, chat, analytics, webhooks, admin, sales, qualitative, scholarships, emails, broadcasts
+
+logger = logging.getLogger(__name__)
 
 # Create tables on startup (creates new tables like 'sales')
 Base.metadata.create_all(bind=engine)
@@ -37,6 +42,7 @@ _add_column_if_missing("products", "deferred_optin_form_id", "TEXT")
 _add_column_if_missing("products", "completion_survey_form_id", "TEXT")
 _add_column_if_missing("products", "completion_survey_field_map", "TEXT")
 _add_column_if_missing("products", "kit_onboarded_tag", "TEXT")
+_add_column_if_missing("products", "kit_offboarded_tag", "TEXT")
 _add_column_if_missing("products", "kit_rsvp_tag", "TEXT")
 _add_column_if_missing("products", "course_start_date", "DATE")
 _add_column_if_missing("products", "sales_target", "INTEGER")
@@ -45,8 +51,28 @@ _add_column_if_missing("enrollments", "kit_tag_pending", "BOOLEAN DEFAULT 0")
 _add_column_if_missing("products", "circle_access_group_id", "INTEGER")
 _add_column_if_missing("products", "circle_onboarded_access_group_id", "INTEGER")
 _add_column_if_missing("products", "circle_offboarded_access_group_id", "INTEGER")
+_add_column_if_missing("email_sends", "broadcast_id", "INTEGER REFERENCES scheduled_broadcasts(id)")
 
-app = FastAPI(title="Every Student Database", version="1.0.0")
+
+# ---------------------------------------------------------------------------
+# Lifespan — start broadcast scheduler
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    from app.broadcast_scheduler import broadcast_loop
+    task = asyncio.create_task(broadcast_loop())
+    logger.info("Broadcast scheduler started")
+    yield
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    logger.info("Broadcast scheduler stopped")
+
+
+app = FastAPI(title="Every Student Database", version="1.0.0", lifespan=lifespan)
 
 # CORS — allow the React frontend (dev server)
 app.add_middleware(
@@ -61,7 +87,7 @@ app.add_middleware(
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
 
 # Paths that skip auth (webhooks need to stay public)
-_PUBLIC_PREFIXES = ("/api/webhook/", "/docs", "/openapi.json", "/assets/")
+_PUBLIC_PREFIXES = ("/api/webhook/", "/api/emails/unsubscribe", "/docs", "/openapi.json", "/assets/", "/static/")
 
 
 @app.middleware("http")
@@ -102,6 +128,13 @@ app.include_router(admin.router)
 app.include_router(sales.router)
 app.include_router(qualitative.router)
 app.include_router(scholarships.router)
+app.include_router(emails.router)
+app.include_router(broadcasts.router)
+
+# Serve static email assets (logos, images)
+STATIC_DIR = Path(__file__).parent.parent / "static"
+if STATIC_DIR.is_dir():
+    app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 # Serve the React frontend (built files)
 FRONTEND_DIR = Path(__file__).parent.parent / "frontend_dist"

@@ -15,7 +15,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Enrollment, Product, Sale, ScholarshipApplication, Student
+from app.models import EmailSend, EmailUnsubscribe, Enrollment, Product, Sale, ScholarshipApplication, Student
+from app.webhook_logger import WebhookLog
 
 logger = logging.getLogger(__name__)
 
@@ -229,9 +230,12 @@ def _circle_api_request(method: str, path: str, body: dict = None) -> Optional[d
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Content-Type", "application/json")
     req.add_header("Authorization", f"Bearer {CIRCLE_API_TOKEN}")
+    req.add_header("User-Agent", "EveryStudentDB/1.0")
     try:
         with urllib.request.urlopen(req) as resp:
-            return json.loads(resp.read())
+            result = json.loads(resp.read())
+            logger.debug("Circle API %s %s → response: %s", method, path, json.dumps(result)[:500])
+            return result
     except urllib.error.HTTPError as e:
         logger.error("Circle API %s %s → %d: %s", method, path, e.code, e.read().decode()[:200])
         return None
@@ -240,15 +244,34 @@ def _circle_api_request(method: str, path: str, body: dict = None) -> Optional[d
         return None
 
 
+def _circle_response_has_member(result: Optional[dict]) -> bool:
+    """Check if a Circle API response actually contains a valid member record."""
+    if not result or not isinstance(result, dict):
+        return False
+    # Circle v2 returns member data with an "id" field on success
+    if result.get("id"):
+        return True
+    # Some endpoints return {"success": true/false}
+    if result.get("success") is True:
+        return True
+    # If response has an error field, it failed
+    if result.get("error"):
+        return False
+    # If response is a non-empty dict without id/success/error, log it for investigation
+    # but treat as failure to be safe
+    return False
+
+
 def circle_invite_member(email: str) -> bool:
     """Invite a member to the Circle community (no invitation email). Returns True on success."""
     result = _circle_api_request("POST", "/community_members", {
         "email": email,
         "skip_invitation_email": True,
     })
-    if result:
-        logger.info("Circle: invited %s to community", email)
+    if _circle_response_has_member(result):
+        logger.info("Circle: invited %s to community (id=%s)", email, result.get("id"))
         return True
+    logger.warning("Circle: invite for %s returned unexpected response: %s", email, json.dumps(result)[:300] if result else "None")
     return False
 
 
@@ -259,9 +282,13 @@ def circle_add_to_access_group(email: str, access_group_id: int) -> bool:
         f"/access_groups/{access_group_id}/community_members",
         {"email": email},
     )
-    if result:
-        logger.info("Circle: added %s to access group %d", email, access_group_id)
+    if _circle_response_has_member(result):
+        logger.info("Circle: added %s to access group %d (id=%s)", email, access_group_id, result.get("id"))
         return True
+    logger.warning(
+        "Circle: add %s to access group %d returned unexpected response: %s",
+        email, access_group_id, json.dumps(result)[:300] if result else "None",
+    )
     return False
 
 
@@ -290,21 +317,35 @@ def kit_tag_added(kit_tag: str, payload: KitWebhookPayload, request: Request, db
     Kit webhook: subscriber added to tag.
     URL pattern: /api/webhook/kit/{kit_tag}
     """
-    if KIT_WEBHOOK_SECRET:
-        secret = request.headers.get("X-Kit-Webhook-Secret", "")
-        if secret != KIT_WEBHOOK_SECRET:
-            raise HTTPException(401, "Invalid webhook secret")
+    wlog = WebhookLog("kit")
+    try:
+        if KIT_WEBHOOK_SECRET:
+            secret = request.headers.get("X-Kit-Webhook-Secret", "")
+            if secret != KIT_WEBHOOK_SECRET:
+                raise HTTPException(401, "Invalid webhook secret")
 
-    sub = payload.subscriber
-    logger.info("Kit webhook: tag=%s email=%s", kit_tag, sub.email_address)
+        sub = payload.subscriber
+        wlog.email = sub.email_address
+        logger.info("Kit webhook: tag=%s email=%s", kit_tag, sub.email_address)
 
-    product = db.query(Product).filter(Product.kit_tag == kit_tag).first()
-    if not product:
-        raise HTTPException(404, f"No product with kit_tag '{kit_tag}'")
+        product = db.query(Product).filter(Product.kit_tag == kit_tag).first()
+        if not product:
+            raise HTTPException(404, f"No product with kit_tag '{kit_tag}'")
+        wlog.product_id = product.product_id
 
-    first, last = _split_name(sub.first_name or "")
-    student = _find_or_create_student(db, sub.email_address, first, last)
-    return _create_enrollment(db, student, product, source="kit")
+        first, last = _split_name(sub.first_name or "")
+        student = _find_or_create_student(db, sub.email_address, first, last)
+        result = _create_enrollment(db, student, product, source="kit")
+        wlog.set_response(result)
+        return result
+    except HTTPException as e:
+        wlog.set_error(e.detail)
+        raise
+    except Exception as e:
+        wlog.set_error(str(e))
+        raise
+    finally:
+        wlog.save()
 
 
 # ---------------------------------------------------------------------------
@@ -317,95 +358,110 @@ async def stripe_checkout(request: Request, db: Session = Depends(get_db)):
     Stripe webhook: checkout.session.completed.
     Matches product via stripe_price_id on the Product record.
     """
-    body = await request.body()
+    wlog = WebhookLog("stripe")
+    try:
+        body = await request.body()
 
-    # Verify Stripe signature
-    if STRIPE_WEBHOOK_SECRET:
-        sig_header = request.headers.get("Stripe-Signature", "")
-        if not _verify_stripe_signature(body, sig_header, STRIPE_WEBHOOK_SECRET):
-            raise HTTPException(401, "Invalid Stripe signature")
+        # Verify Stripe signature
+        if STRIPE_WEBHOOK_SECRET:
+            sig_header = request.headers.get("Stripe-Signature", "")
+            if not _verify_stripe_signature(body, sig_header, STRIPE_WEBHOOK_SECRET):
+                raise HTTPException(401, "Invalid Stripe signature")
 
-    event = json.loads(body)
+        event = json.loads(body)
 
-    if event.get("type") != "checkout.session.completed":
-        return {"status": "ignored", "event_type": event.get("type")}
+        if event.get("type") != "checkout.session.completed":
+            wlog.set_ignored()
+            return {"status": "ignored", "event_type": event.get("type")}
 
-    session = event["data"]["object"]
-    email = session.get("customer_email") or session.get("customer_details", {}).get("email")
-    name = session.get("customer_details", {}).get("name", "")
+        session = event["data"]["object"]
+        email = session.get("customer_email") or session.get("customer_details", {}).get("email")
+        name = session.get("customer_details", {}).get("name", "")
+        wlog.email = email
 
-    if not email:
-        raise HTTPException(400, "No customer email in checkout session")
+        if not email:
+            raise HTTPException(400, "No customer email in checkout session")
 
-    # Get the price ID from line items (Stripe includes it in the session)
-    # For expanded sessions, line_items may be nested; we also check metadata
-    price_id = session.get("metadata", {}).get("price_id")
-    if not price_id:
-        line_items = session.get("line_items", {}).get("data", [])
-        if line_items:
-            price_id = line_items[0].get("price", {}).get("id")
+        # Get the price ID from line items (Stripe includes it in the session)
+        # For expanded sessions, line_items may be nested; we also check metadata
+        price_id = session.get("metadata", {}).get("price_id")
+        if not price_id:
+            line_items = session.get("line_items", {}).get("data", [])
+            if line_items:
+                price_id = line_items[0].get("price", {}).get("id")
 
-    # Also try to match by metadata product_id directly
-    product = None
-    meta_product_id = session.get("metadata", {}).get("product_id")
-    if meta_product_id:
-        product = db.query(Product).filter(Product.product_id == meta_product_id).first()
+        # Also try to match by metadata product_id directly
+        product = None
+        meta_product_id = session.get("metadata", {}).get("product_id")
+        if meta_product_id:
+            product = db.query(Product).filter(Product.product_id == meta_product_id).first()
 
-    if not product and price_id:
-        product = db.query(Product).filter(Product.stripe_price_id == price_id).first()
+        if not product and price_id:
+            product = db.query(Product).filter(Product.stripe_price_id == price_id).first()
 
-    if not product:
-        logger.warning("Stripe webhook: no matching product. price_id=%s metadata=%s", price_id, session.get("metadata"))
-        raise HTTPException(404, "No matching product for this checkout session")
+        if not product:
+            logger.warning("Stripe webhook: no matching product. price_id=%s metadata=%s", price_id, session.get("metadata"))
+            raise HTTPException(404, "No matching product for this checkout session")
 
-    logger.info("Stripe webhook: email=%s product=%s", email, product.product_id)
-    first, last = _split_name(name)
-    student = _find_or_create_student(db, email, first, last)
+        wlog.product_id = product.product_id
+        logger.info("Stripe webhook: email=%s product=%s", email, product.product_id)
+        first, last = _split_name(name)
+        student = _find_or_create_student(db, email, first, last)
 
-    # Create Sale from Stripe checkout data
-    session_id = session.get("id", "")
-    sale_id_str = f"stripe_{session_id}"
-    existing_sale = db.query(Sale).filter(Sale.sale_id == sale_id_str).first()
-    sale = existing_sale
-    if not existing_sale:
-        amount_total = session.get("amount_total") or 0
-        currency = (session.get("currency") or "usd").upper()
-        payment_intent = session.get("payment_intent")
-        sale = Sale(
-            sale_id=sale_id_str,
-            buyer_email=email.lower().strip(),
-            buyer_name=name or None,
-            product_id=product.id,
-            amount_cents=amount_total,
-            currency=currency,
-            quantity=1,
-            status="completed",
-            source="stripe",
-            stripe_checkout_session_id=session_id,
-            stripe_payment_intent_id=payment_intent if isinstance(payment_intent, str) else None,
-            purchase_date=datetime.utcnow(),
+        # Create Sale from Stripe checkout data
+        session_id = session.get("id", "")
+        sale_id_str = f"stripe_{session_id}"
+        existing_sale = db.query(Sale).filter(Sale.sale_id == sale_id_str).first()
+        sale = existing_sale
+        if not existing_sale:
+            amount_total = session.get("amount_total") or 0
+            currency = (session.get("currency") or "usd").upper()
+            payment_intent = session.get("payment_intent")
+            sale = Sale(
+                sale_id=sale_id_str,
+                buyer_email=email.lower().strip(),
+                buyer_name=name or None,
+                product_id=product.id,
+                amount_cents=amount_total,
+                currency=currency,
+                quantity=1,
+                status="completed",
+                source="stripe",
+                stripe_checkout_session_id=session_id,
+                stripe_payment_intent_id=payment_intent if isinstance(payment_intent, str) else None,
+                purchase_date=datetime.utcnow(),
+            )
+            db.add(sale)
+            db.flush()
+
+        # Auto-match scholarship: if accepted scholarship exists for this email+product, flag the sale
+        clean_buyer_email = email.lower().strip()
+        scholarship_app = (
+            db.query(ScholarshipApplication)
+            .filter(
+                func.lower(ScholarshipApplication.email) == clean_buyer_email,
+                ScholarshipApplication.product_id == product.id,
+                ScholarshipApplication.status == "accepted",
+            )
+            .first()
         )
-        db.add(sale)
-        db.flush()
+        if scholarship_app:
+            sale.scholarship = 1
+            scholarship_app.enrolled = True
+            db.commit()
+            logger.info("Scholarship auto-matched: sale=%s app=#%d", sale.sale_id, scholarship_app.id)
 
-    # Auto-match scholarship: if accepted scholarship exists for this email+product, flag the sale
-    clean_buyer_email = email.lower().strip()
-    scholarship_app = (
-        db.query(ScholarshipApplication)
-        .filter(
-            func.lower(ScholarshipApplication.email) == clean_buyer_email,
-            ScholarshipApplication.product_id == product.id,
-            ScholarshipApplication.status == "accepted",
-        )
-        .first()
-    )
-    if scholarship_app:
-        sale.scholarship = 1
-        scholarship_app.enrolled = True
-        db.commit()
-        logger.info("Scholarship auto-matched: sale=%s app=#%d", sale.sale_id, scholarship_app.id)
-
-    return _create_enrollment(db, student, product, source="stripe", sale_id=sale.id)
+        result = _create_enrollment(db, student, product, source="stripe", sale_id=sale.id)
+        wlog.set_response(result)
+        return result
+    except HTTPException as e:
+        wlog.set_error(e.detail)
+        raise
+    except Exception as e:
+        wlog.set_error(str(e))
+        raise
+    finally:
+        wlog.save()
 
 
 def _verify_stripe_signature(payload: bytes, sig_header: str, secret: str) -> bool:
@@ -442,27 +498,40 @@ def form_submission(product_id: str, payload: FormWebhookPayload, request: Reque
     URL pattern: /api/webhook/form/{product_id}
     Accepts JSON with at minimum: email. Optionally: first_name, last_name, or name.
     """
-    if KIT_WEBHOOK_SECRET:
-        secret = request.headers.get("X-Webhook-Secret", "")
-        if secret != KIT_WEBHOOK_SECRET:
-            raise HTTPException(401, "Invalid webhook secret")
+    wlog = WebhookLog("form", product_id=product_id)
+    try:
+        if KIT_WEBHOOK_SECRET:
+            secret = request.headers.get("X-Webhook-Secret", "")
+            if secret != KIT_WEBHOOK_SECRET:
+                raise HTTPException(401, "Invalid webhook secret")
 
-    product = db.query(Product).filter(Product.product_id == product_id).first()
-    if not product:
-        raise HTTPException(404, f"No product with product_id '{product_id}'")
+        wlog.email = payload.email
+        product = db.query(Product).filter(Product.product_id == product_id).first()
+        if not product:
+            raise HTTPException(404, f"No product with product_id '{product_id}'")
 
-    # Resolve name fields
-    if payload.first_name:
-        first = payload.first_name
-        last = payload.last_name or ""
-    elif payload.name:
-        first, last = _split_name(payload.name)
-    else:
-        first, last = "Unknown", ""
+        # Resolve name fields
+        if payload.first_name:
+            first = payload.first_name
+            last = payload.last_name or ""
+        elif payload.name:
+            first, last = _split_name(payload.name)
+        else:
+            first, last = "Unknown", ""
 
-    logger.info("Form webhook: product=%s email=%s", product_id, payload.email)
-    student = _find_or_create_student(db, payload.email, first, last)
-    return _create_enrollment(db, student, product, source="form")
+        logger.info("Form webhook: product=%s email=%s", product_id, payload.email)
+        student = _find_or_create_student(db, payload.email, first, last)
+        result = _create_enrollment(db, student, product, source="form")
+        wlog.set_response(result)
+        return result
+    except HTTPException as e:
+        wlog.set_error(e.detail)
+        raise
+    except Exception as e:
+        wlog.set_error(str(e))
+        raise
+    finally:
+        wlog.save()
 
 
 # ---------------------------------------------------------------------------
@@ -631,85 +700,101 @@ async def typeform_scholarship(request: Request, db: Session = Depends(get_db)):
     Scholarship application webhook (shared form, not per-product).
     URL: /api/webhook/typeform/scholarship
     """
-    body = await request.body()
+    wlog = WebhookLog("typeform_scholarship")
+    try:
+        body = await request.body()
 
-    if TYPEFORM_WEBHOOK_SECRET:
-        sig_header = request.headers.get("Typeform-Signature", "")
-        if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
-            raise HTTPException(401, "Invalid Typeform signature")
+        if TYPEFORM_WEBHOOK_SECRET:
+            sig_header = request.headers.get("Typeform-Signature", "")
+            if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
+                raise HTTPException(401, "Invalid Typeform signature")
 
-    payload = json.loads(body)
+        payload = json.loads(body)
 
-    event_type = payload.get("event_type")
-    if event_type != "form_response":
-        return {"status": "ignored", "event_type": event_type}
+        event_type = payload.get("event_type")
+        if event_type != "form_response":
+            wlog.set_ignored()
+            return {"status": "ignored", "event_type": event_type}
 
-    form_response = payload.get("form_response", {})
-    answers = form_response.get("answers", [])
+        form_response = payload.get("form_response", {})
+        answers = form_response.get("answers", [])
 
-    parsed = {}  # type: Dict[str, Any]
-    for answer in answers:
-        field_id = answer.get("field", {}).get("id", "")
-        mapped = _SCHOLARSHIP_FIELD_MAP.get(field_id)
-        if not mapped:
-            continue
+        parsed = {}  # type: Dict[str, Any]
+        for answer in answers:
+            field_id = answer.get("field", {}).get("id", "")
+            mapped = _SCHOLARSHIP_FIELD_MAP.get(field_id)
+            if not mapped:
+                continue
 
-        if mapped == "contact_info":
-            ci = answer.get("contact_info") or answer.get("contacts") or {}
-            parsed["first_name"] = ci.get("first_name", "")
-            parsed["last_name"] = ci.get("last_name", "")
-            parsed["email"] = ci.get("email", "")
-        elif mapped in ("first_name", "last_name"):
-            parsed[mapped] = _extract_typeform_answer(answer)
-        elif mapped == "email":
-            parsed["email"] = _extract_typeform_answer(answer)
-        elif mapped == "is_subscriber":
-            parsed["is_subscriber"] = answer.get("boolean", False)
-        elif mapped == "course_name":
-            parsed["course_name"] = _extract_typeform_answer(answer)
-        else:
-            parsed[mapped] = _extract_typeform_answer(answer)
+            if mapped == "contact_info":
+                ci = answer.get("contact_info") or answer.get("contacts") or {}
+                parsed["first_name"] = ci.get("first_name", "")
+                parsed["last_name"] = ci.get("last_name", "")
+                parsed["email"] = ci.get("email", "")
+            elif mapped in ("first_name", "last_name"):
+                parsed[mapped] = _extract_typeform_answer(answer)
+            elif mapped == "email":
+                parsed["email"] = _extract_typeform_answer(answer)
+            elif mapped == "is_subscriber":
+                parsed["is_subscriber"] = answer.get("boolean", False)
+            elif mapped == "course_name":
+                parsed["course_name"] = _extract_typeform_answer(answer)
+            else:
+                parsed[mapped] = _extract_typeform_answer(answer)
 
-    email = (parsed.get("email") or "").lower().strip()
-    if not email:
-        raise HTTPException(400, "No email found in scholarship application")
+        email = (parsed.get("email") or "").lower().strip()
+        wlog.email = email
+        if not email:
+            raise HTTPException(400, "No email found in scholarship application")
 
-    product = _fuzzy_match_product(parsed.get("course_name", ""), db)
+        product = _fuzzy_match_product(parsed.get("course_name", ""), db)
+        if product:
+            wlog.product_id = product.product_id
 
-    submitted_at = form_response.get("submitted_at")
-    applied_at = None
-    if submitted_at:
-        try:
-            applied_at = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
-        except (ValueError, TypeError):
-            applied_at = datetime.utcnow()
+        submitted_at = form_response.get("submitted_at")
+        applied_at = None
+        if submitted_at:
+            try:
+                applied_at = datetime.fromisoformat(submitted_at.replace("Z", "+00:00"))
+            except (ValueError, TypeError):
+                applied_at = datetime.utcnow()
 
-    app = ScholarshipApplication(
-        email=email,
-        first_name=parsed.get("first_name", ""),
-        last_name=parsed.get("last_name", ""),
-        product_id=product.id if product else None,
-        is_subscriber=parsed.get("is_subscriber"),
-        amount_willing_to_pay=parsed.get("amount_willing_to_pay"),
-        circumstances=parsed.get("circumstances"),
-        hopes=parsed.get("hopes"),
-        best_case_impact=parsed.get("best_case_impact"),
-        status="pending",
-        applied_at=applied_at or datetime.utcnow(),
-    )
-    db.add(app)
-    db.commit()
+        app = ScholarshipApplication(
+            email=email,
+            first_name=parsed.get("first_name", ""),
+            last_name=parsed.get("last_name", ""),
+            product_id=product.id if product else None,
+            is_subscriber=parsed.get("is_subscriber"),
+            amount_willing_to_pay=parsed.get("amount_willing_to_pay"),
+            circumstances=parsed.get("circumstances"),
+            hopes=parsed.get("hopes"),
+            best_case_impact=parsed.get("best_case_impact"),
+            status="pending",
+            applied_at=applied_at or datetime.utcnow(),
+        )
+        db.add(app)
+        db.commit()
 
-    logger.info(
-        "Scholarship application #%d from %s for %s",
-        app.id, email, product.product_name if product else "unknown course",
-    )
-    return {
-        "status": "application_received",
-        "id": app.id,
-        "email": email,
-        "product": product.product_name if product else None,
-    }
+        logger.info(
+            "Scholarship application #%d from %s for %s",
+            app.id, email, product.product_name if product else "unknown course",
+        )
+        result = {
+            "status": "application_received",
+            "id": app.id,
+            "email": email,
+            "product": product.product_name if product else None,
+        }
+        wlog.set_response(result)
+        return result
+    except HTTPException as e:
+        wlog.set_error(e.detail)
+        raise
+    except Exception as e:
+        wlog.set_error(str(e))
+        raise
+    finally:
+        wlog.save()
 
 
 # ---------------------------------------------------------------------------
@@ -727,118 +812,135 @@ async def typeform_submission(
     Parses Typeform's nested answer structure, enriches the student record,
     and creates/confirms enrollment.
     """
-    body = await request.body()
+    wlog = WebhookLog("typeform_onboarding", product_id=product_id)
+    try:
+        body = await request.body()
 
-    # Verify signature if secret is configured
-    if TYPEFORM_WEBHOOK_SECRET:
-        sig_header = request.headers.get("Typeform-Signature", "")
-        if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
-            raise HTTPException(401, "Invalid Typeform signature")
+        # Verify signature if secret is configured
+        if TYPEFORM_WEBHOOK_SECRET:
+            sig_header = request.headers.get("Typeform-Signature", "")
+            if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
+                raise HTTPException(401, "Invalid Typeform signature")
 
-    payload = json.loads(body)
+        payload = json.loads(body)
 
-    # Validate event type
-    event_type = payload.get("event_type")
-    if event_type != "form_response":
-        return {"status": "ignored", "event_type": event_type}
+        # Validate event type
+        event_type = payload.get("event_type")
+        if event_type != "form_response":
+            wlog.set_ignored()
+            return {"status": "ignored", "event_type": event_type}
 
-    form_response = payload.get("form_response", {})
+        form_response = payload.get("form_response", {})
 
-    # Look up product
-    product = db.query(Product).filter(Product.product_id == product_id).first()
-    if not product:
-        raise HTTPException(404, f"No product with product_id '{product_id}'")
+        # Look up product
+        product = db.query(Product).filter(Product.product_id == product_id).first()
+        if not product:
+            raise HTTPException(404, f"No product with product_id '{product_id}'")
 
-    # Optionally validate form_id (accept onboarding OR deferred opt-in form)
-    form_id = form_response.get("form_id")
-    allowed_form_ids = set(
-        fid for fid in [product.typeform_form_id, product.deferred_optin_form_id] if fid
-    )
-    if allowed_form_ids and form_id not in allowed_form_ids:
-        raise HTTPException(
-            400,
-            f"Form ID mismatch: expected one of {allowed_form_ids}, got {form_id}",
+        # Optionally validate form_id (accept onboarding OR deferred opt-in form)
+        form_id = form_response.get("form_id")
+        allowed_form_ids = set(
+            fid for fid in [product.typeform_form_id, product.deferred_optin_form_id] if fid
         )
-
-    # Parse field map from product config
-    field_map = None
-    if product.typeform_field_map:
-        try:
-            field_map = json.loads(product.typeform_field_map)
-        except json.JSONDecodeError:
-            logger.warning("Invalid typeform_field_map JSON for product %s", product_id)
-
-    # Extract student data from answers
-    parsed = _parse_typeform_answers(form_response, field_map)
-
-    email = parsed.pop("email", None)
-    if not email:
-        raise HTTPException(400, "No email found in Typeform response")
-
-    first_name = parsed.pop("first_name", "Unknown")
-    last_name = parsed.pop("last_name", "")
-
-    logger.info("Typeform webhook: product=%s email=%s fields=%s", product_id, email, list(parsed.keys()))
-
-    # Find or create student
-    student = _find_or_create_student(db, email, first_name, last_name)
-
-    # Enrich student with additional fields from the form
-    updated_fields = []
-    for field, value in parsed.items():
-        if field in _STUDENT_FIELDS and field not in ("email", "first_name", "last_name"):
-            if value is None:
-                continue
-            # Type coercions for SQLAlchemy column types
-            if field == "dob" and isinstance(value, str):
-                from datetime import date as date_type
-                try:
-                    value = date_type.fromisoformat(value)
-                except (ValueError, TypeError):
-                    continue
-            if field == "claude_confidence_level" and not isinstance(value, (int, float)):
-                try:
-                    value = float(value)
-                except (ValueError, TypeError):
-                    continue
-            setattr(student, field, value)
-            updated_fields.append(field)
-
-    # Set onboarding_date from Typeform's submitted_at
-    submitted_at = form_response.get("submitted_at")
-    if submitted_at:
-        try:
-            student.onboarding_date = datetime.fromisoformat(
-                submitted_at.replace("Z", "+00:00")
+        if allowed_form_ids and form_id not in allowed_form_ids:
+            raise HTTPException(
+                400,
+                f"Form ID mismatch: expected one of {allowed_form_ids}, got {form_id}",
             )
-            updated_fields.append("onboarding_date")
-        except (ValueError, TypeError):
-            pass
 
-    if updated_fields:
-        db.commit()
-        logger.info("Enriched student #%d with: %s", student.student_number, updated_fields)
+        # Parse field map from product config
+        field_map = None
+        if product.typeform_field_map:
+            try:
+                field_map = json.loads(product.typeform_field_map)
+            except json.JSONDecodeError:
+                logger.warning("Invalid typeform_field_map JSON for product %s", product_id)
 
-    # Tag subscriber in Kit if product has an onboarded tag configured
-    kit_tagged = False
-    if product.kit_onboarded_tag:
-        kit_tagged = kit_tag_subscriber_by_email(email, product.kit_onboarded_tag)
+        # Extract student data from answers
+        parsed = _parse_typeform_answers(form_response, field_map)
 
-    # Add to Circle onboarded access group if configured
-    circle_onboarded = False
-    if product.circle_onboarded_access_group_id:
-        circle_onboarded = circle_add_to_access_group(
-            email, product.circle_onboarded_access_group_id
-        )
+        email = parsed.pop("email", None)
+        if not email:
+            raise HTTPException(400, "No email found in Typeform response")
+        wlog.email = email
 
-    # Create enrollment as safety net (idempotent — normally student is already enrolled)
-    result = _create_enrollment(db, student, product, source="typeform")
-    result["enriched_fields"] = updated_fields
-    if product.kit_onboarded_tag:
-        result["kit_tagged"] = kit_tagged
-    if product.circle_onboarded_access_group_id:
-        result["circle_onboarded"] = circle_onboarded
-    return result
+        first_name = parsed.pop("first_name", "Unknown")
+        last_name = parsed.pop("last_name", "")
+
+        logger.info("Typeform webhook: product=%s email=%s fields=%s", product_id, email, list(parsed.keys()))
+
+        # Find or create student
+        student = _find_or_create_student(db, email, first_name, last_name)
+
+        # Enrich student with additional fields from the form
+        updated_fields = []
+        for field, value in parsed.items():
+            if field in _STUDENT_FIELDS and field not in ("email", "first_name", "last_name"):
+                if value is None:
+                    continue
+                # Type coercions for SQLAlchemy column types
+                if field == "dob" and isinstance(value, str):
+                    from datetime import date as date_type
+                    try:
+                        value = date_type.fromisoformat(value)
+                    except (ValueError, TypeError):
+                        continue
+                if field == "claude_confidence_level" and not isinstance(value, (int, float)):
+                    try:
+                        value = float(value)
+                    except (ValueError, TypeError):
+                        continue
+                setattr(student, field, value)
+                updated_fields.append(field)
+
+        # Set onboarding_date from Typeform's submitted_at
+        submitted_at = form_response.get("submitted_at")
+        if submitted_at:
+            try:
+                student.onboarding_date = datetime.fromisoformat(
+                    submitted_at.replace("Z", "+00:00")
+                )
+                updated_fields.append("onboarding_date")
+            except (ValueError, TypeError):
+                pass
+
+        if updated_fields:
+            db.commit()
+            logger.info("Enriched student #%d with: %s", student.student_number, updated_fields)
+
+        # Tag subscriber in Kit if product has an onboarded tag configured
+        kit_tagged = False
+        if product.kit_onboarded_tag:
+            kit_tagged = kit_tag_subscriber_by_email(email, product.kit_onboarded_tag)
+
+        # Add to Circle onboarded access group if configured
+        circle_onboarded = False
+        if product.circle_onboarded_access_group_id:
+            circle_onboarded = circle_add_to_access_group(
+                email, product.circle_onboarded_access_group_id
+            )
+
+        # Create enrollment as safety net (idempotent — normally student is already enrolled)
+        result = _create_enrollment(db, student, product, source="typeform")
+        result["enriched_fields"] = updated_fields
+        if product.kit_onboarded_tag:
+            result["kit_tagged"] = kit_tagged
+        if product.circle_onboarded_access_group_id:
+            result["circle_onboarded"] = circle_onboarded
+        wlog.set_response(result)
+        if kit_tagged:
+            wlog.kit_tagged = True
+        if circle_onboarded:
+            wlog.circle_access_group_added = True
+        return result
+    except HTTPException as e:
+        wlog.set_error(e.detail)
+        raise
+    except Exception as e:
+        wlog.set_error(str(e))
+        raise
+    finally:
+        wlog.save()
 
 
 # ---------------------------------------------------------------------------
@@ -893,107 +995,188 @@ async def typeform_completion_survey(
 
     Finds the student's enrollment and populates survey response fields.
     """
-    body = await request.body()
+    wlog = WebhookLog("typeform_completion", product_id=product_id)
+    try:
+        body = await request.body()
 
-    # Verify signature if secret is configured
-    if TYPEFORM_WEBHOOK_SECRET:
-        sig_header = request.headers.get("Typeform-Signature", "")
-        if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
-            raise HTTPException(401, "Invalid Typeform signature")
+        # Verify signature if secret is configured
+        if TYPEFORM_WEBHOOK_SECRET:
+            sig_header = request.headers.get("Typeform-Signature", "")
+            if not _verify_typeform_signature(body, sig_header, TYPEFORM_WEBHOOK_SECRET):
+                raise HTTPException(401, "Invalid Typeform signature")
 
-    payload = json.loads(body)
+        payload = json.loads(body)
 
-    # Validate event type
-    event_type = payload.get("event_type")
-    if event_type != "form_response":
-        return {"status": "ignored", "event_type": event_type}
+        # Validate event type
+        event_type = payload.get("event_type")
+        if event_type != "form_response":
+            wlog.set_ignored()
+            return {"status": "ignored", "event_type": event_type}
 
-    form_response = payload.get("form_response", {})
+        form_response = payload.get("form_response", {})
 
-    # Look up product
-    product = db.query(Product).filter(Product.product_id == product_id).first()
-    if not product:
-        raise HTTPException(404, f"No product with product_id '{product_id}'")
+        # Look up product
+        product = db.query(Product).filter(Product.product_id == product_id).first()
+        if not product:
+            raise HTTPException(404, f"No product with product_id '{product_id}'")
 
-    # Optionally validate form_id
-    form_id = form_response.get("form_id")
-    if product.completion_survey_form_id and form_id != product.completion_survey_form_id:
-        raise HTTPException(
-            400,
-            f"Form ID mismatch: expected {product.completion_survey_form_id}, got {form_id}",
-        )
-
-    # Parse field map from product config
-    field_map = None
-    if product.completion_survey_field_map:
-        try:
-            field_map = json.loads(product.completion_survey_field_map)
-        except json.JSONDecodeError:
-            logger.warning("Invalid completion_survey_field_map JSON for product %s", product_id)
-
-    # Extract survey data from answers
-    parsed = _parse_completion_answers(form_response, field_map)
-
-    email = parsed.pop("email", None)
-    if not email:
-        raise HTTPException(400, "No email found in completion survey response")
-
-    clean_email = email.lower().strip()
-    logger.info("Completion survey: product=%s email=%s fields=%s", product_id, clean_email, list(parsed.keys()))
-
-    # Find the student
-    student = db.query(Student).filter(func.lower(Student.email) == clean_email).first()
-    if not student:
-        raise HTTPException(404, f"No student found with email '{clean_email}'")
-
-    # Find the enrollment
-    enrollment = (
-        db.query(Enrollment)
-        .filter(Enrollment.student_id == student.id, Enrollment.product_id == product.id)
-        .first()
-    )
-    if not enrollment:
-        raise HTTPException(404, f"No enrollment found for student '{clean_email}' in product '{product_id}'")
-
-    # Update enrollment with survey fields
-    updated_fields = []
-    for field, value in parsed.items():
-        if field in _ENROLLMENT_SURVEY_FIELDS:
-            # Type coercions for integer fields
-            if field in ("confidence_after", "recommend_score", "transformational_score", "delivered_on_promise_score"):
-                try:
-                    value = int(value)
-                except (ValueError, TypeError):
-                    continue
-            setattr(enrollment, field, value)
-            updated_fields.append(field)
-
-    # Set survey metadata
-    enrollment.survey_response_type = "completion"
-    submitted_at = form_response.get("submitted_at")
-    if submitted_at:
-        try:
-            enrollment.survey_submit_date = datetime.fromisoformat(
-                submitted_at.replace("Z", "+00:00")
+        # Optionally validate form_id
+        form_id = form_response.get("form_id")
+        if product.completion_survey_form_id and form_id != product.completion_survey_form_id:
+            raise HTTPException(
+                400,
+                f"Form ID mismatch: expected {product.completion_survey_form_id}, got {form_id}",
             )
-        except (ValueError, TypeError):
-            pass
 
-    db.commit()
-    logger.info("Completion survey saved for enrollment %s: %s", enrollment.enrollment_id, updated_fields)
+        # Parse field map from product config
+        field_map = None
+        if product.completion_survey_field_map:
+            try:
+                field_map = json.loads(product.completion_survey_field_map)
+            except json.JSONDecodeError:
+                logger.warning("Invalid completion_survey_field_map JSON for product %s", product_id)
 
-    # Add to Circle offboarded access group if configured
-    circle_offboarded = False
-    if product.circle_offboarded_access_group_id:
-        circle_offboarded = circle_add_to_access_group(
-            clean_email, product.circle_offboarded_access_group_id
+        # Extract survey data from answers
+        parsed = _parse_completion_answers(form_response, field_map)
+
+        email = parsed.pop("email", None)
+        if not email:
+            raise HTTPException(400, "No email found in completion survey response")
+
+        clean_email = email.lower().strip()
+        wlog.email = clean_email
+        logger.info("Completion survey: product=%s email=%s fields=%s", product_id, clean_email, list(parsed.keys()))
+
+        # Find the student
+        student = db.query(Student).filter(func.lower(Student.email) == clean_email).first()
+        if not student:
+            raise HTTPException(404, f"No student found with email '{clean_email}'")
+
+        # Find the enrollment
+        enrollment = (
+            db.query(Enrollment)
+            .filter(Enrollment.student_id == student.id, Enrollment.product_id == product.id)
+            .first()
         )
+        if not enrollment:
+            raise HTTPException(404, f"No enrollment found for student '{clean_email}' in product '{product_id}'")
 
-    result = {
-        "status": "survey_saved",
-        "enrollment_id": enrollment.enrollment_id,
-        "updated_fields": updated_fields,
+        # Update enrollment with survey fields
+        updated_fields = []
+        for field, value in parsed.items():
+            if field in _ENROLLMENT_SURVEY_FIELDS:
+                # Type coercions for integer fields
+                if field in ("confidence_after", "recommend_score", "transformational_score", "delivered_on_promise_score"):
+                    try:
+                        value = int(value)
+                    except (ValueError, TypeError):
+                        continue
+                setattr(enrollment, field, value)
+                updated_fields.append(field)
+
+        # Set survey metadata
+        enrollment.survey_response_type = "completion"
+        submitted_at = form_response.get("submitted_at")
+        if submitted_at:
+            try:
+                enrollment.survey_submit_date = datetime.fromisoformat(
+                    submitted_at.replace("Z", "+00:00")
+                )
+            except (ValueError, TypeError):
+                pass
+
+        db.commit()
+        logger.info("Completion survey saved for enrollment %s: %s", enrollment.enrollment_id, updated_fields)
+
+        # Tag in Kit if offboarded tag configured
+        kit_tagged = False
+        if product.kit_offboarded_tag:
+            kit_tagged = kit_tag_subscriber_by_email(clean_email, product.kit_offboarded_tag)
+
+        # Add to Circle offboarded access group if configured
+        circle_offboarded = False
+        if product.circle_offboarded_access_group_id:
+            circle_offboarded = circle_add_to_access_group(
+                clean_email, product.circle_offboarded_access_group_id
+            )
+
+        result = {
+            "status": "survey_saved",
+            "enrollment_id": enrollment.enrollment_id,
+            "updated_fields": updated_fields,
+        }
+        if product.kit_offboarded_tag:
+            result["kit_offboarded_tagged"] = kit_tagged
+        if product.circle_offboarded_access_group_id:
+            result["circle_offboarded"] = circle_offboarded
+        wlog.set_response(result)
+        return result
+    except HTTPException as e:
+        wlog.set_error(e.detail)
+        raise
+    except Exception as e:
+        wlog.set_error(str(e))
+        raise
+    finally:
+        wlog.save()
+
+
+# ---------------------------------------------------------------------------
+# Resend webhook — delivery, bounce, complaint tracking
+# ---------------------------------------------------------------------------
+
+@router.post("/resend")
+async def resend_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Handle Resend webhook events: delivered, bounced, complained.
+    Updates email_sends status and auto-suppresses on bounce/complaint.
+    """
+    try:
+        payload = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+
+    event_type = payload.get("type", "")
+    data = payload.get("data", {})
+
+    status_map = {
+        "email.delivered": "delivered",
+        "email.bounced": "bounced",
+        "email.complained": "complained",
     }
-    if product.circle_offboarded_access_group_id:
-        result["circle_offboarded"] = circle_offboarded
-    return result
+
+    new_status = status_map.get(event_type)
+    if not new_status:
+        return {"status": "ignored", "event": event_type}
+
+    # Find the email send by resend_id
+    email_id = data.get("email_id", "")
+    if email_id:
+        send = db.query(EmailSend).filter(EmailSend.resend_id == email_id).first()
+        if send:
+            send.status = new_status
+            db.commit()
+
+    # Auto-suppress on bounce/complaint
+    if new_status in ("bounced", "complained"):
+        to_email = data.get("to", [""])[0] if isinstance(data.get("to"), list) else data.get("to", "")
+        if to_email:
+            existing = (
+                db.query(EmailUnsubscribe)
+                .filter(
+                    EmailUnsubscribe.email == to_email.lower(),
+                    EmailUnsubscribe.product_id.is_(None),
+                )
+                .first()
+            )
+            if not existing:
+                unsub = EmailUnsubscribe(
+                    email=to_email.lower(),
+                    product_id=None,
+                    reason=new_status,
+                    unsubscribed_at=datetime.utcnow(),
+                )
+                db.add(unsub)
+                db.commit()
+
+    return {"status": "processed", "event": event_type}

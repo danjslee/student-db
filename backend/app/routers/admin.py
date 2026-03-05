@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import logging
-from typing import List
+import os
+import time
+from datetime import datetime, timedelta
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends
 from fastapi.responses import HTMLResponse
@@ -9,7 +13,7 @@ from sqlalchemy import func, desc, case, and_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
-from app.models import Product, Student, Enrollment
+from app.models import Enrollment, Product, Student, WebhookEvent
 
 logger = logging.getLogger(__name__)
 
@@ -286,6 +290,245 @@ def pending_kit_tags(db: Session = Depends(get_db)):
     return {"count": len(items), "enrollments": items}
 
 
+@router.get("/api/admin/webhook-health")
+def webhook_health(db: Session = Depends(get_db)):
+    """Webhook event stats, staleness detection, and recent errors."""
+    now = datetime.utcnow()
+    cutoff_24h = now - timedelta(hours=24)
+    cutoff_7d = now - timedelta(days=7)
+
+    all_endpoints = [
+        "kit", "stripe", "form",
+        "typeform_scholarship", "typeform_onboarding", "typeform_completion",
+    ]
+
+    # Per-endpoint stats
+    endpoint_stats = {}
+    for ep in all_endpoints:
+        stats_24h = (
+            db.query(
+                WebhookEvent.status,
+                func.count(WebhookEvent.id),
+            )
+            .filter(WebhookEvent.endpoint == ep, WebhookEvent.timestamp >= cutoff_24h)
+            .group_by(WebhookEvent.status)
+            .all()
+        )
+        stats_7d = (
+            db.query(
+                WebhookEvent.status,
+                func.count(WebhookEvent.id),
+            )
+            .filter(WebhookEvent.endpoint == ep, WebhookEvent.timestamp >= cutoff_7d)
+            .group_by(WebhookEvent.status)
+            .all()
+        )
+        last_event = (
+            db.query(WebhookEvent.timestamp)
+            .filter(WebhookEvent.endpoint == ep)
+            .order_by(desc(WebhookEvent.timestamp))
+            .first()
+        )
+
+        # Downstream success rates (7d)
+        downstream_7d = (
+            db.query(
+                func.count(WebhookEvent.id).label("total"),
+                func.sum(case((WebhookEvent.kit_tagged == True, 1), else_=0)).label("kit_tagged"),
+                func.sum(case((WebhookEvent.circle_invited == True, 1), else_=0)).label("circle_invited"),
+                func.sum(case((WebhookEvent.circle_access_group_added == True, 1), else_=0)).label("circle_ag"),
+                func.sum(case((WebhookEvent.enrollment_created == True, 1), else_=0)).label("enrolled"),
+            )
+            .filter(
+                WebhookEvent.endpoint == ep,
+                WebhookEvent.timestamp >= cutoff_7d,
+                WebhookEvent.status == "success",
+            )
+            .first()
+        )
+
+        endpoint_stats[ep] = {
+            "counts_24h": {s: c for s, c in stats_24h},
+            "counts_7d": {s: c for s, c in stats_7d},
+            "last_fired": last_event[0].isoformat() if last_event and last_event[0] else None,
+            "downstream_7d": {
+                "total": downstream_7d.total if downstream_7d else 0,
+                "kit_tagged": downstream_7d.kit_tagged if downstream_7d else 0,
+                "circle_invited": downstream_7d.circle_invited if downstream_7d else 0,
+                "circle_access_group": downstream_7d.circle_ag if downstream_7d else 0,
+                "enrollment_created": downstream_7d.enrolled if downstream_7d else 0,
+            },
+        }
+
+    # Staleness detection per active product
+    staleness_alerts = []
+    products = db.query(Product).all()
+    for p in products:
+        has_trigger = bool(p.kit_tag or p.stripe_price_id)
+        if not has_trigger:
+            continue
+
+        has_enrollments = db.query(Enrollment.id).filter(Enrollment.product_id == p.id).first() is not None
+        if not has_enrollments:
+            continue
+
+        # Determine phase
+        start = p.course_start_date
+        today = now.date()
+        if start and today >= start and today <= start + timedelta(days=30):
+            phase = "active"
+            enrollment_threshold = timedelta(days=7)
+            onboarding_threshold = timedelta(days=2)
+        elif start and today < start:
+            phase = "pre_course"
+            enrollment_threshold = timedelta(days=7)
+            onboarding_threshold = None
+        else:
+            continue  # post-course / idle — suppress
+
+        # Check enrollment endpoints (kit, stripe, form)
+        last_enrollment = (
+            db.query(func.max(WebhookEvent.timestamp))
+            .filter(
+                WebhookEvent.endpoint.in_(["kit", "stripe", "form"]),
+                WebhookEvent.product_id == p.product_id,
+                WebhookEvent.status == "success",
+            )
+            .scalar()
+        )
+        if last_enrollment and now - last_enrollment > enrollment_threshold:
+            staleness_alerts.append({
+                "product": p.product_name,
+                "product_id": p.product_id,
+                "flow": "enrollment",
+                "last_seen": last_enrollment.isoformat(),
+                "threshold_hours": int(enrollment_threshold.total_seconds() / 3600),
+                "severity": "red" if now - last_enrollment > enrollment_threshold * 2 else "amber",
+            })
+        elif not last_enrollment and phase == "active":
+            staleness_alerts.append({
+                "product": p.product_name,
+                "product_id": p.product_id,
+                "flow": "enrollment",
+                "last_seen": None,
+                "threshold_hours": int(enrollment_threshold.total_seconds() / 3600),
+                "severity": "red",
+            })
+
+        # Check onboarding/completion (active phase only)
+        if onboarding_threshold:
+            for ep_name, ep_label in [("typeform_onboarding", "onboarding"), ("typeform_completion", "completion")]:
+                last_tf = (
+                    db.query(func.max(WebhookEvent.timestamp))
+                    .filter(
+                        WebhookEvent.endpoint == ep_name,
+                        WebhookEvent.product_id == p.product_id,
+                        WebhookEvent.status == "success",
+                    )
+                    .scalar()
+                )
+                if last_tf and now - last_tf > onboarding_threshold:
+                    staleness_alerts.append({
+                        "product": p.product_name,
+                        "product_id": p.product_id,
+                        "flow": ep_label,
+                        "last_seen": last_tf.isoformat(),
+                        "threshold_hours": int(onboarding_threshold.total_seconds() / 3600),
+                        "severity": "red" if now - last_tf > onboarding_threshold * 2 else "amber",
+                    })
+
+    # Recent errors (last 10)
+    recent_errors = (
+        db.query(WebhookEvent)
+        .filter(WebhookEvent.status == "error")
+        .order_by(desc(WebhookEvent.timestamp))
+        .limit(10)
+        .all()
+    )
+
+    return {
+        "generated_at": now.isoformat(),
+        "endpoints": endpoint_stats,
+        "staleness_alerts": staleness_alerts,
+        "recent_errors": [
+            {
+                "id": e.id,
+                "timestamp": e.timestamp.isoformat(),
+                "endpoint": e.endpoint,
+                "product_id": e.product_id,
+                "email": e.email,
+                "error_message": e.error_message,
+                "duration_ms": e.duration_ms,
+            }
+            for e in recent_errors
+        ],
+    }
+
+
+@router.get("/api/admin/api-status")
+def api_status():
+    """Live-test external API connections (Kit, Circle) and report config status."""
+    import urllib.request
+    import urllib.error
+
+    results = {}
+
+    # Kit: test with a lightweight GET
+    kit_key = os.getenv("KIT_API_KEY", "")
+    if kit_key:
+        try:
+            start = time.time()
+            req = urllib.request.Request(
+                "https://api.kit.com/v4/tags?per_page=1",
+                method="GET",
+            )
+            req.add_header("X-Kit-Api-Key", kit_key)
+            req.add_header("Content-Type", "application/json")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+                latency_ms = int((time.time() - start) * 1000)
+                results["kit"] = {"status": "ok", "latency_ms": latency_ms}
+        except Exception as e:
+            latency_ms = int((time.time() - start) * 1000)
+            results["kit"] = {"status": "error", "error": str(e)[:200], "latency_ms": latency_ms}
+    else:
+        results["kit"] = {"status": "not_configured"}
+
+    # Circle: test with a lightweight GET
+    circle_token = os.getenv("CIRCLE_API_TOKEN", "")
+    if circle_token:
+        try:
+            start = time.time()
+            req = urllib.request.Request(
+                "https://app.circle.so/api/admin/v2/community",
+                method="GET",
+            )
+            req.add_header("Authorization", f"Bearer {circle_token}")
+            req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "EveryStudentDB/1.0")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                resp.read()
+                latency_ms = int((time.time() - start) * 1000)
+                results["circle"] = {"status": "ok", "latency_ms": latency_ms}
+        except Exception as e:
+            latency_ms = int((time.time() - start) * 1000)
+            results["circle"] = {"status": "error", "error": str(e)[:200], "latency_ms": latency_ms}
+    else:
+        results["circle"] = {"status": "not_configured"}
+
+    # Stripe: config check only (no outbound test)
+    results["stripe"] = {
+        "status": "configured" if os.getenv("STRIPE_WEBHOOK_SECRET", "") else "not_configured",
+    }
+
+    # Typeform: config check only
+    results["typeform"] = {
+        "status": "configured" if os.getenv("TYPEFORM_WEBHOOK_SECRET", "") else "not_configured",
+    }
+
+    return {"checked_at": datetime.utcnow().isoformat(), "services": results}
+
+
 ADMIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -297,7 +540,15 @@ ADMIN_HTML = """<!DOCTYPE html>
   body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
          background: #0f1117; color: #e0e0e0; padding: 2rem; }
   h1 { font-size: 1.4rem; color: #fff; margin-bottom: 0.5rem; }
-  .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 2rem; }
+  .subtitle { color: #888; font-size: 0.85rem; margin-bottom: 1rem; }
+  .tabs { display: flex; gap: 0; border-bottom: 1px solid #2a2d37; margin-bottom: 1.5rem; }
+  .tab-btn { padding: 0.6rem 1.2rem; border: none; border-bottom: 3px solid transparent;
+             background: none; font-size: 0.85rem; font-weight: 500; color: #888;
+             cursor: pointer; transition: color 0.15s, border-color 0.15s; }
+  .tab-btn:hover { color: #ccc; }
+  .tab-btn.active { color: #fff; border-bottom-color: #fff; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
   .stats { display: flex; gap: 1rem; margin-bottom: 2rem; flex-wrap: wrap; }
   .stat { background: #1a1d27; border: 1px solid #2a2d37; border-radius: 8px;
           padding: 1.2rem 1.5rem; min-width: 140px; }
@@ -333,19 +584,59 @@ ADMIN_HTML = """<!DOCTYPE html>
   .loading { color: #666; padding: 2rem; text-align: center; }
   a { color: #60a5fa; text-decoration: none; }
   a:hover { text-decoration: underline; }
+  /* System Health styles */
+  .health-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0.75rem; margin-bottom: 1.5rem; }
+  .health-card { background: #1a1d27; border: 1px solid #2a2d37; border-radius: 8px; padding: 1rem; }
+  .health-card-hdr { display: flex; align-items: center; gap: 0.4rem; }
+  .health-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .health-dot.ok { background: #4ade80; }
+  .health-dot.configured { background: #fbbf24; }
+  .health-dot.not_configured { background: #555; }
+  .health-dot.error { background: #ef4444; }
+  .health-name { font-weight: 600; color: #fff; font-size: 0.9rem; flex: 1; }
+  .health-latency { font-size: 0.75rem; color: #666; font-family: monospace; }
+  .health-status-txt { font-size: 0.8rem; color: #aaa; margin-top: 0.3rem; }
+  .health-error-txt { font-size: 0.75rem; color: #ef4444; margin-top: 0.25rem; word-break: break-all; }
+  .alert-card { border-radius: 8px; padding: 0.8rem 1rem; margin-bottom: 0.5rem; }
+  .alert-amber { background: #2d2215; border: 1px solid #5a4a2d; }
+  .alert-red { background: #2d1215; border: 1px solid #5a2028; }
+  .alert-title { font-weight: 600; font-size: 0.85rem; }
+  .alert-amber .alert-title { color: #fbbf24; }
+  .alert-red .alert-title { color: #ef4444; }
+  .alert-detail { font-size: 0.8rem; color: #aaa; margin-top: 0.25rem; }
+  .refresh-btn { padding: 0.4rem 1rem; font-size: 0.8rem; color: #ccc; background: transparent;
+                 border: 1px solid #2a2d37; border-radius: 6px; cursor: pointer; margin-left: auto; }
+  .refresh-btn:hover { border-color: #555; color: #fff; }
+  .section-hdr { display: flex; align-items: center; gap: 0.5rem; }
+  .no-errors { color: #4ade80; font-size: 0.85rem; padding: 0.5rem 0; }
+  @media (max-width: 700px) { .health-cards { grid-template-columns: repeat(2, 1fr); } }
 </style>
 </head>
 <body>
 <h1>Every Student DB</h1>
-<p class="subtitle">Enrollment flows & webhook status</p>
+<p class="subtitle">Admin Dashboard</p>
 
-<div id="app"><div class="loading">Loading...</div></div>
+<div class="tabs">
+  <button class="tab-btn active" onclick="showTab('flows')">Flows</button>
+  <button class="tab-btn" onclick="showTab('health')">System Health</button>
+</div>
+
+<div id="tab-flows" class="tab-panel active"><div class="loading">Loading...</div></div>
+<div id="tab-health" class="tab-panel"><div class="loading">Loading...</div></div>
 
 <script>
+function showTab(name) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  event.target.classList.add('active');
+  document.getElementById('tab-' + name).classList.add('active');
+  if (name === 'health' && !window._healthLoaded) loadHealth();
+}
+
 async function load() {
   const res = await fetch('/api/admin/overview');
   const d = await res.json();
-  const app = document.getElementById('app');
+  const el = document.getElementById('tab-flows');
 
   const BASE = window.location.origin;
 
@@ -397,14 +688,134 @@ async function load() {
         <td>${e.student_name}</td>
         <td style="color:#888">${e.student_email}</td>
         <td>${e.product}</td>
-        <td><span class="status">${e.status || '—'}</span></td>
+        <td><span class="status">${e.status || '\\u2014'}</span></td>
       </tr>`;
     }
     html += '</tbody></table>';
   }
 
-  app.innerHTML = html;
+  el.innerHTML = html;
 }
+
+async function loadHealth() {
+  window._healthLoaded = true;
+  const el = document.getElementById('tab-health');
+  el.innerHTML = '<div class="loading">Loading health data...</div>';
+
+  try {
+    const [healthRes, statusRes] = await Promise.all([
+      fetch('/api/admin/webhook-health'),
+      fetch('/api/admin/api-status'),
+    ]);
+    const health = await healthRes.json();
+    const apiStatus = await statusRes.json();
+    renderHealth(el, health, apiStatus);
+  } catch (e) {
+    el.innerHTML = '<p style="color:#ef4444">Failed to load health data: ' + e.message + '</p>';
+  }
+}
+
+function renderHealth(el, health, apiStatus) {
+  const svc = apiStatus.services || {};
+  let html = '<div class="section-hdr"><h2 style="margin:0">API Connections</h2>'
+    + '<button class="refresh-btn" onclick="window._healthLoaded=false;loadHealth()">Refresh</button></div>';
+  html += '<div class="health-cards">';
+  for (const [name, data] of Object.entries(svc)) {
+    const label = name.charAt(0).toUpperCase() + name.slice(1);
+    html += `<div class="health-card">
+      <div class="health-card-hdr">
+        <span class="health-dot ${data.status}"></span>
+        <span class="health-name">${label}</span>
+        ${data.latency_ms != null ? '<span class="health-latency">' + data.latency_ms + 'ms</span>' : ''}
+      </div>
+      <div class="health-status-txt">${data.status}</div>
+      ${data.error ? '<div class="health-error-txt">' + data.error + '</div>' : ''}
+    </div>`;
+  }
+  html += '</div>';
+
+  // Staleness alerts
+  const alerts = health.staleness_alerts || [];
+  if (alerts.length > 0) {
+    html += '<h2>Staleness Alerts</h2>';
+    for (const a of alerts) {
+      const cls = a.severity === 'red' ? 'alert-red' : 'alert-amber';
+      const lastSeen = a.last_seen ? new Date(a.last_seen).toLocaleString() : 'Never';
+      html += `<div class="alert-card ${cls}">
+        <div class="alert-title">${a.product} \\u2014 ${a.flow}</div>
+        <div class="alert-detail">Last seen: ${lastSeen} | Expected every ${a.threshold_hours}h</div>
+      </div>`;
+    }
+  }
+
+  // Webhook activity table
+  html += '<h2>Webhook Activity</h2>';
+  html += `<table><thead><tr>
+    <th>Endpoint</th><th style="text-align:right">24h Total</th>
+    <th style="text-align:right">24h Errors</th><th style="text-align:right">7d Total</th>
+    <th>Last Fired</th></tr></thead><tbody>`;
+  const eps = health.endpoints || {};
+  for (const [name, s] of Object.entries(eps)) {
+    const c24 = s.counts_24h || {};
+    const c7 = s.counts_7d || {};
+    const t24 = Object.values(c24).reduce((a,b) => a+b, 0);
+    const t7 = Object.values(c7).reduce((a,b) => a+b, 0);
+    const e24 = c24.error || 0;
+    const last = s.last_fired ? new Date(s.last_fired).toLocaleString() : 'Never';
+    html += `<tr>
+      <td><code>${name}</code></td>
+      <td style="text-align:right">${t24}</td>
+      <td style="text-align:right;${e24 > 0 ? 'color:#ef4444' : ''}">${e24}</td>
+      <td style="text-align:right">${t7}</td>
+      <td style="color:#aaa;font-size:0.8rem">${last}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+
+  // Downstream actions (7d)
+  html += '<h2>Downstream Actions (7d)</h2>';
+  html += `<table><thead><tr>
+    <th>Endpoint</th><th style="text-align:right">Success Events</th>
+    <th style="text-align:right">Kit Tagged</th><th style="text-align:right">Circle Invited</th>
+    <th style="text-align:right">Circle AG</th><th style="text-align:right">Enrolled</th>
+    </tr></thead><tbody>`;
+  for (const [name, s] of Object.entries(eps)) {
+    const d = s.downstream_7d || {};
+    if (!d.total) continue;
+    html += `<tr>
+      <td><code>${name}</code></td>
+      <td style="text-align:right">${d.total}</td>
+      <td style="text-align:right">${d.kit_tagged || 0}</td>
+      <td style="text-align:right">${d.circle_invited || 0}</td>
+      <td style="text-align:right">${d.circle_access_group || 0}</td>
+      <td style="text-align:right">${d.enrollment_created || 0}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+
+  // Recent errors
+  html += '<h2>Recent Errors</h2>';
+  const errors = health.recent_errors || [];
+  if (errors.length === 0) {
+    html += '<div class="no-errors">No recent errors</div>';
+  } else {
+    html += `<table><thead><tr>
+      <th>Time</th><th>Endpoint</th><th>Product</th><th>Error</th>
+      </tr></thead><tbody>`;
+    for (const e of errors) {
+      html += `<tr>
+        <td style="color:#aaa;font-size:0.8rem">${new Date(e.timestamp).toLocaleString()}</td>
+        <td><code>${e.endpoint}</code></td>
+        <td>${e.product_id || '\\u2014'}</td>
+        <td style="color:#ef4444;font-size:0.8rem;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.error_message}</td>
+      </tr>`;
+    }
+    html += '</tbody></table>';
+  }
+
+  el.innerHTML = html;
+}
+
 load();
 </script>
 </body>

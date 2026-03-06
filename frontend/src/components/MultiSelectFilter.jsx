@@ -12,7 +12,7 @@ export default function MultiSelectFilter({ items, selected, onToggle, label }) 
               key={item.id}
               className={`filter-chip${isSelected ? " selected" : ""}`}
               onClick={() => onToggle(item.id)}
-              style={isSelected ? { backgroundColor: colors.primary, borderColor: colors.primary, color: "#fff" } : {}}
+              style={isSelected ? { backgroundColor: colors.primary, borderColor: colors.primary, color: "#0c0a09" } : {}}
             >
               {item.label}
             </button>

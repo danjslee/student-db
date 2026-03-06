@@ -1,6 +1,6 @@
 // Design system for all charts — single source of truth for colors, tooltips, axes
 export const colors = {
-  primary: "#6d9eeb",
+  primary: "#b5f0f0",
   secondary: "#81c784",
   tertiary: "#ce93d8",
   warm: "#f4a261",
@@ -28,7 +28,7 @@ export const npsColor = (score) => {
 // Enrollment status color map
 export const statusColors = {
   "Full Fee": colors.primary,
-  "Early Bird": "#4fc3f7",
+  "Early Bird": "#7ad4d4",
   "Scholarship": colors.tertiary,
   "Free Place": colors.muted,
   "Refunded": colors.rose,

@@ -2,6 +2,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import os
 import logging
 import secrets
@@ -11,7 +14,7 @@ from pathlib import Path
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 
 from sqlalchemy import inspect, text
 
@@ -83,25 +86,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Basic auth — protects all routes except webhooks and static assets
+# Auth — cookie-based login page + Basic auth fallback for API
 DASHBOARD_PASSWORD = os.getenv("DASHBOARD_PASSWORD", "")
+_COOKIE_NAME = "every_session"
 
 # Paths that skip auth (webhooks need to stay public)
-_PUBLIC_PREFIXES = ("/api/webhook/", "/api/emails/unsubscribe", "/docs", "/openapi.json", "/assets/", "/static/")
+_PUBLIC_PREFIXES = ("/api/webhook/", "/api/emails/unsubscribe", "/docs", "/openapi.json", "/assets/", "/static/", "/login")
+
+
+def _make_session_token(password: str) -> str:
+    return hmac.new(password.encode(), b"every-student-db-session", hashlib.sha256).hexdigest()
 
 
 @app.middleware("http")
-async def basic_auth_middleware(request: Request, call_next):
+async def auth_middleware(request: Request, call_next):
     path = request.url.path
 
     # Skip auth for public paths
     if not DASHBOARD_PASSWORD or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
         return await call_next(request)
 
-    # Check for Basic auth header
+    # Check session cookie first
+    token = request.cookies.get(_COOKIE_NAME, "")
+    if token and hmac.compare_digest(token, _make_session_token(DASHBOARD_PASSWORD)):
+        return await call_next(request)
+
+    # Fall back to Basic auth (for API/curl access)
     auth = request.headers.get("Authorization", "")
     if auth.startswith("Basic "):
-        import base64
         try:
             decoded = base64.b64decode(auth[6:]).decode()
             username, password = decoded.split(":", 1)
@@ -110,12 +122,75 @@ async def basic_auth_middleware(request: Request, call_next):
         except Exception:
             pass
 
-    # No valid auth — return 401 with WWW-Authenticate to trigger browser login prompt
+    # Redirect browsers to login page
+    accept = request.headers.get("Accept", "")
+    if "text/html" in accept:
+        return RedirectResponse("/login", status_code=302)
     return Response(
         status_code=401,
         headers={"WWW-Authenticate": 'Basic realm="Student Dashboard"'},
         content="Unauthorized",
     )
+
+
+@app.get("/login", response_class=HTMLResponse)
+async def login_page(request: Request, error: str = ""):
+    error_html = '<p style="color:#dc2626;margin-bottom:1rem">Incorrect password</p>' if error else ""
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Login — Every Student Database</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+         background: #0c0a09; color: #ffffff;
+         display: flex; align-items: center; justify-content: center; min-height: 100vh; }}
+  .login-card {{ width: 340px; text-align: center; }}
+  h1 {{ font-family: Georgia, 'Times New Roman', serif; font-size: 1.6rem; font-weight: 400;
+       margin-bottom: 2rem; }}
+  form {{ display: flex; flex-direction: column; gap: 1rem; }}
+  input {{ font-family: inherit; font-size: 1rem; padding: 0.7rem 1rem;
+          border: 1px solid #292524; border-radius: 6px; background: #1c1917; color: #ffffff;
+          text-align: center; outline: none; }}
+  input:focus {{ border-color: #b5f0f0; }}
+  button {{ font-family: inherit; font-size: 1rem; font-weight: 500;
+           padding: 0.7rem 1rem; background: #b5f0f0; color: #0c0a09; border: none;
+           border-radius: 6px; cursor: pointer; transition: background 0.2s; }}
+  button:hover {{ background: #8fd4d4; }}
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>Every Student Database</h1>
+  {error_html}
+  <form method="post" action="/login" autocomplete="on">
+    <input type="hidden" name="username" value="admin" autocomplete="username">
+    <input type="password" name="password" placeholder="Password" autocomplete="current-password" autofocus required>
+    <button type="submit">Sign in</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
+@app.post("/login")
+async def login_submit(request: Request):
+    form = await request.form()
+    password = form.get("password", "")
+    if secrets.compare_digest(password, DASHBOARD_PASSWORD):
+        response = RedirectResponse("/", status_code=302)
+        response.set_cookie(
+            _COOKIE_NAME,
+            _make_session_token(DASHBOARD_PASSWORD),
+            max_age=60 * 60 * 24 * 30,  # 30 days
+            httponly=True,
+            samesite="lax",
+            secure=True,
+        )
+        return response
+    return RedirectResponse("/login?error=1", status_code=302)
 
 # Register routers
 app.include_router(students.router)

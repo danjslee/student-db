@@ -17,6 +17,8 @@ from sqlalchemy.orm import Session
 from app.database import get_db
 from app.models import EmailSend, EmailUnsubscribe, Enrollment, Product, Sale, ScholarshipApplication, Student
 from app.webhook_logger import WebhookLog
+from app.email_service import send_email, get_unsubscribe_url, inject_unsubscribe_footer
+from app.email_templates.every import TEMPLATE_REGISTRY
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,55 @@ def _create_enrollment(
                 student.email, product.circle_access_group_id
             )
 
+    # Carry-forward: if student already has enrichment data from a previous course,
+    # treat them as onboarded for this product too (add to onboarded access group + Kit tag)
+    circle_onboarded_carried = False
+    kit_onboarded_carried = False
+    if student.onboarding_date and student.country:
+        if product.circle_onboarded_access_group_id:
+            circle_onboarded_carried = circle_add_to_access_group(
+                student.email, product.circle_onboarded_access_group_id
+            )
+        if product.kit_onboarded_tag:
+            kit_onboarded_carried = kit_tag_subscriber_by_email(
+                student.email, product.kit_onboarded_tag
+            )
+        if circle_onboarded_carried or kit_onboarded_carried:
+            logger.info(
+                "Carry-forward onboarding for %s: circle_onboarded=%s, kit_onboarded=%s",
+                student.email, circle_onboarded_carried, kit_onboarded_carried,
+            )
+
+    # Auto-send onboarding confirmation if template exists and within cutoff
+    auto_email_sent = False
+    if "onboarding_confirmation" in TEMPLATE_REGISTRY:
+        # Cutoff: March 12 2026 00:00 ET (= March 12 05:00 UTC)
+        from zoneinfo import ZoneInfo
+        cutoff_et = datetime(2026, 3, 12, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+        now_et = datetime.now(ZoneInfo("America/New_York"))
+        if now_et < cutoff_et:
+            try:
+                display_name = student.preferred_name or student.first_name
+                template_fn = TEMPLATE_REGISTRY["onboarding_confirmation"]
+                rendered = template_fn(display_name, product)
+                unsub_url = get_unsubscribe_url(student.email, product.id)
+                html = inject_unsubscribe_footer(rendered["html"], unsub_url)
+                send_email(
+                    db=db,
+                    to_email=student.email,
+                    subject=rendered["subject"],
+                    html=html,
+                    client="every",
+                    email_type="onboarding_confirmation",
+                    student_id=student.id,
+                    product_id=product.id,
+                    dry_run=False,
+                )
+                auto_email_sent = True
+                logger.info("Auto-sent onboarding confirmation to %s", student.email)
+            except Exception as e:
+                logger.error("Auto-send onboarding confirmation failed for %s: %s", student.email, e)
+
     result = {
         "status": "enrolled",
         "enrollment_id": enrollment_id,
@@ -128,6 +179,12 @@ def _create_enrollment(
     if product.circle_access_group_id:
         result["circle_invited"] = circle_invited
         result["circle_access_group_added"] = circle_access_group_added
+    if auto_email_sent:
+        result["auto_email_sent"] = True
+    if circle_onboarded_carried:
+        result["circle_onboarded_carried_forward"] = True
+    if kit_onboarded_carried:
+        result["kit_onboarded_carried_forward"] = True
     return result
 
 
@@ -1100,6 +1157,35 @@ async def typeform_completion_survey(
                 clean_email, product.circle_offboarded_access_group_id
             )
 
+        # Auto-send recording_discount email if template exists
+        auto_email_sent = False
+        if "recording_discount" in TEMPLATE_REGISTRY:
+            try:
+                display_name = student.preferred_name or student.first_name
+                template_fn = TEMPLATE_REGISTRY["recording_discount"]
+                rendered = template_fn(display_name, product,
+                    recording_url="https://every-e29269.circle.so/c/recordings-takeaways-f99009/",
+                    discount_code="BPRA20",
+                    discount_url="https://every.to/courses",
+                )
+                unsub_url = get_unsubscribe_url(student.email, product.id)
+                html = inject_unsubscribe_footer(rendered["html"], unsub_url)
+                send_email(
+                    db=db,
+                    to_email=student.email,
+                    subject=rendered["subject"],
+                    html=html,
+                    client="every",
+                    email_type="recording_discount",
+                    student_id=student.id,
+                    product_id=product.id,
+                    dry_run=False,
+                )
+                auto_email_sent = True
+                logger.info("Auto-sent recording_discount to %s", student.email)
+            except Exception as e:
+                logger.error("Auto-send recording_discount failed for %s: %s", student.email, e)
+
         result = {
             "status": "survey_saved",
             "enrollment_id": enrollment.enrollment_id,
@@ -1109,6 +1195,7 @@ async def typeform_completion_survey(
             result["kit_offboarded_tagged"] = kit_tagged
         if product.circle_offboarded_access_group_id:
             result["circle_offboarded"] = circle_offboarded
+        result["recording_discount_sent"] = auto_email_sent
         wlog.set_response(result)
         return result
     except HTTPException as e:

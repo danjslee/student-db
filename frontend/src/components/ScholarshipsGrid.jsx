@@ -108,6 +108,29 @@ export default function ScholarshipsGrid() {
         editable: false,
         valueFormatter: (p) => (p.value ? `$${p.value}` : ""),
       },
+      {
+        headerName: "Pays",
+        width: 80,
+        editable: false,
+        valueGetter: (p) => {
+          if (!p.data.decision_tier) return null;
+          return p.data.is_subscriber ? p.data.decision_tier : p.data.decision_tier + 288;
+        },
+        valueFormatter: (p) => (p.value ? `$${p.value}` : ""),
+      },
+      {
+        headerName: "Discount",
+        width: 90,
+        editable: false,
+        valueGetter: (p) => {
+          if (!p.data.decision_tier || !p.data.product_name) return null;
+          const prices = { "Build Production Ready Apps": 1350, "Claude Code for Beginners": 1250 };
+          const price = prices[p.data.product_name];
+          if (!price) return null;
+          return p.data.is_subscriber ? price - p.data.decision_tier : price - (p.data.decision_tier + 288);
+        },
+        valueFormatter: (p) => (p.value ? `$${p.value}` : ""),
+      },
       { field: "discount_code", headerName: "Code", width: 140, editable: false },
       {
         field: "enrolled",

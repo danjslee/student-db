@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["admin"])
 
 
+@router.post("/api/admin/reconcile-circle")
+def reconcile_circle(db: Session = Depends(get_db)):
+    """Manually trigger Circle access group reconciliation."""
+    from app.circle_reconciler import reconcile_circle_access
+    result = reconcile_circle_access(db)
+    return {"status": "ok", "summary": result}
+
+
 @router.get("/api/admin/overview")
 def admin_overview(db: Session = Depends(get_db)):
     """Aggregated view of all products, triggers, and enrollment stats."""

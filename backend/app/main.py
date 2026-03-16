@@ -64,15 +64,19 @@ _add_column_if_missing("email_sends", "broadcast_id", "INTEGER REFERENCES schedu
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.broadcast_scheduler import broadcast_loop
-    task = asyncio.create_task(broadcast_loop())
+    from app.circle_reconciler import reconcile_loop
+    broadcast_task = asyncio.create_task(broadcast_loop())
+    reconcile_task = asyncio.create_task(reconcile_loop())
     logger.info("Broadcast scheduler started")
     yield
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    logger.info("Broadcast scheduler stopped")
+    broadcast_task.cancel()
+    reconcile_task.cancel()
+    for t in (broadcast_task, reconcile_task):
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+    logger.info("Background tasks stopped")
 
 
 app = FastAPI(title="Every Student Database", version="1.0.0", lifespan=lifespan)

@@ -124,13 +124,18 @@ def get_broadcast_recipients(
     from sqlalchemy import or_
 
     # Base: enrolled students for this product
-    rows = (
+    query = (
         db.query(Student.id, Student.email, Student.preferred_name, Student.first_name)
         .join(Enrollment, Enrollment.student_id == Student.id)
         .filter(Enrollment.product_id == product_id)
         .filter(Enrollment.status != "cancelled")
-        .all()
     )
+
+    # Optional: filter to students who have NOT completed the reflection survey
+    if filter_tag == "not_completed_survey":
+        query = query.filter(Enrollment.recommend_score.is_(None))
+
+    rows = query.all()
 
     recipients = []
     for student_id, email, preferred_name, first_name in rows:

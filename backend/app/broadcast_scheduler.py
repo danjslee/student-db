@@ -8,6 +8,7 @@ asleep and misses a window, it catches up on next wake.
 import asyncio
 import json
 import logging
+import time
 from datetime import datetime
 
 from app.database import SessionLocal
@@ -133,6 +134,10 @@ def execute_broadcast(db, broadcast):
                 dry_run=broadcast.dry_run,
             )
             sent += 1
+
+            # Rate limit: Resend allows 2 req/sec, pause 0.6s between live sends
+            if not broadcast.dry_run:
+                time.sleep(0.6)
 
         except Exception as e:
             errors += 1

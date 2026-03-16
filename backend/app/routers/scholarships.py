@@ -4,7 +4,7 @@ import logging
 from datetime import datetime
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -134,6 +134,22 @@ def ai_assess_scholarship(
 
     logger.info("Scholarship #%d AI assessed: tier=%d", app_id, assessment.ai_recommended_tier)
     return {"status": "ok", "id": app_id, "ai_recommended_tier": assessment.ai_recommended_tier}
+
+
+@router.delete("/scholarship-applications/{app_id}", status_code=204)
+def delete_scholarship_application(
+    app_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete a scholarship application (e.g. spam/test cleanup)."""
+    app = db.query(ScholarshipApplication).get(app_id)
+    if not app:
+        raise HTTPException(404, "Scholarship application not found")
+
+    db.delete(app)
+    db.commit()
+    logger.info("Scholarship #%d deleted", app_id)
+    return Response(status_code=204)
 
 
 @router.post("/scholarship-applications/{app_id}/kit-delivered")

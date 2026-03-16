@@ -3,7 +3,7 @@ Email management routes — preview, send, view send history, unsubscribe, webho
 """
 
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.database import get_db
-from app.models import EmailSend, Student, Enrollment, Product, EmailUnsubscribe
+from app.models import EmailSend, Student, Enrollment, Product, EmailUnsubscribe, ScholarshipApplication
 from app.email_service import send_email, verify_unsubscribe_token
 from app.email_templates import every as every_templates
 
@@ -101,6 +101,62 @@ def get_send(send_id: int, db: Session = Depends(get_db)):
         "sent_at": s.sent_at.isoformat() if s.sent_at else None,
         "error_message": s.error_message,
     }
+
+
+# ---------------------------------------------------------------------------
+# Test send — render any template and send to a specified email
+# ---------------------------------------------------------------------------
+
+class TestEmailRequest(BaseModel):
+    email_type: str
+    to_email: str
+    product_id: int
+    first_name: str = "Dan"
+    dry_run: bool = True
+    template_params: Optional[dict] = None
+
+
+@router.post("/send/test")
+def send_test_email(req: TestEmailRequest, db: Session = Depends(get_db)):
+    """Render a template from the registry and send to any email (for testing)."""
+    from app.email_service import send_email, get_unsubscribe_url, inject_unsubscribe_footer
+
+    template_fn = every_templates.TEMPLATE_REGISTRY.get(req.email_type)
+    if not template_fn:
+        available = list(every_templates.TEMPLATE_REGISTRY.keys())
+        raise HTTPException(400, f"Unknown email_type '{req.email_type}'. Available: {available}")
+
+    product = db.query(Product).filter(Product.id == req.product_id).first()
+    if not product:
+        raise HTTPException(404, "Product not found")
+
+    params = req.template_params or {}
+    rendered = template_fn(req.first_name, product, **params)
+
+    unsub_url = get_unsubscribe_url(req.to_email, req.product_id)
+    html = inject_unsubscribe_footer(rendered["html"], unsub_url)
+
+    result = send_email(
+        db=db,
+        to_email=req.to_email,
+        subject=rendered["subject"],
+        html=html,
+        client="every",
+        email_type=f"test_{req.email_type}",
+        product_id=product.id,
+        dry_run=req.dry_run,
+    )
+
+    # Auto-delete test send record — tests shouldn't pollute the send log
+    if result.get("email_send_id"):
+        db.query(EmailSend).filter(EmailSend.id == result["email_send_id"]).delete()
+        db.commit()
+
+    result["preview"] = {
+        "to": req.to_email,
+        "subject": rendered["subject"],
+    }
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +310,151 @@ def list_unsubscribes(
         }
         for u in unsubs
     ]
+
+
+# ---------------------------------------------------------------------------
+# Scholarship decision emails
+# ---------------------------------------------------------------------------
+
+# Tier pricing: subscriber pays tier, non-subscriber pays tier + $288 (subscription cost)
+SUBSCRIPTION_COST = 288
+
+
+class ScholarshipEmailRequest(BaseModel):
+    app_id: int
+    checkout_url: Optional[str] = None
+    dry_run: bool = True
+
+
+class ScholarshipBatchEmailRequest(BaseModel):
+    app_ids: List[int]
+    checkout_url: Optional[str] = None
+    dry_run: bool = True
+
+
+def _send_scholarship_decision(app_id: int, dry_run: bool, db: Session, checkout_url: Optional[str] = None) -> dict:
+    """Core logic for sending a single scholarship decision email."""
+    app = db.query(ScholarshipApplication).get(app_id)
+    if not app:
+        raise HTTPException(404, f"Scholarship application {app_id} not found")
+
+    if app.status not in ("accepted", "rejected"):
+        raise HTTPException(400, f"Application {app_id} status is '{app.status}' — must be accepted or rejected")
+
+    if app.kit_delivered:
+        raise HTTPException(400, f"Application {app_id} already delivered")
+
+    product = db.query(Product).get(app.product_id) if app.product_id else None
+    # Display names for scholarship emails (friendlier than DB product_name)
+    COURSE_DISPLAY_NAMES = {
+        "Build Production Ready Apps": "Build a Production-ready App",
+    }
+    raw_name = product.product_name if product else None
+    course_name = COURSE_DISPLAY_NAMES.get(raw_name, raw_name) if raw_name else "the course"
+    first_name = app.first_name or "there"
+
+    if app.status == "accepted":
+        if not app.discount_code:
+            raise HTTPException(400, f"Application {app_id} accepted but no discount_code set")
+        if not app.decision_tier:
+            raise HTTPException(400, f"Application {app_id} accepted but no decision_tier set")
+
+        # Calculate pay amount: tier for subscribers, tier + subscription for non-subscribers
+        if app.is_subscriber:
+            pay_amount = app.decision_tier
+        else:
+            pay_amount = app.decision_tier + SUBSCRIPTION_COST
+
+        # Use provided checkout_url or leave empty (caller provides from course registry)
+        checkout_url = checkout_url or ""
+
+        email_type = "scholarship_accepted"
+        template_fn = every_templates.TEMPLATE_REGISTRY["scholarship_accepted"]
+        rendered = template_fn(
+            first_name=first_name,
+            product=product,
+            discount_code=app.discount_code,
+            pay_amount=pay_amount,
+            checkout_url=checkout_url,
+            course_name=course_name,
+        )
+    else:
+        email_type = "scholarship_rejected"
+        template_fn = every_templates.TEMPLATE_REGISTRY["scholarship_rejected"]
+        rendered = template_fn(
+            first_name=first_name,
+            product=product,
+            course_name=course_name,
+        )
+
+    result = send_email(
+        db=db,
+        to_email=app.email,
+        subject=rendered["subject"],
+        html=rendered["html"],
+        client="every",
+        email_type=email_type,
+        product_id=app.product_id,
+        dry_run=dry_run,
+    )
+
+    # Mark delivered on successful live send
+    if not dry_run and result.get("status") == "sent":
+        app.kit_delivered = True
+        app.kit_delivered_at = datetime.utcnow()
+        app.processing_status = "processed"
+        db.commit()
+
+    result["preview"] = {
+        "to": app.email,
+        "name": f"{app.first_name} {app.last_name}",
+        "status": app.status,
+        "subject": rendered["subject"],
+        "html": rendered["html"],
+    }
+    if app.status == "accepted":
+        result["preview"]["tier"] = app.decision_tier
+        result["preview"]["discount_code"] = app.discount_code
+
+    return result
+
+
+@router.post("/send/scholarship-decision")
+def send_scholarship_decision(req: ScholarshipEmailRequest, db: Session = Depends(get_db)):
+    """Preview or send a single scholarship decision email (accepted or rejected)."""
+    return _send_scholarship_decision(req.app_id, req.dry_run, db, checkout_url=req.checkout_url)
+
+
+@router.post("/send/scholarship-decisions-batch")
+def send_scholarship_decisions_batch(req: ScholarshipBatchEmailRequest, db: Session = Depends(get_db)):
+    """Preview or send scholarship decision emails for multiple applications."""
+    results = []
+    sent = 0
+    failed = 0
+
+    for i, app_id in enumerate(req.app_ids):
+        # Rate limit: 1s pause between live sends (Resend allows 2/sec)
+        if i > 0 and not req.dry_run:
+            import time
+            time.sleep(1)
+        try:
+            result = _send_scholarship_decision(app_id, req.dry_run, db, checkout_url=req.checkout_url)
+            results.append({"app_id": app_id, "status": "ok", "detail": result})
+            sent += 1
+        except HTTPException as e:
+            results.append({"app_id": app_id, "status": "error", "detail": e.detail})
+            failed += 1
+        except Exception as e:
+            results.append({"app_id": app_id, "status": "error", "detail": str(e)})
+            failed += 1
+
+    return {
+        "total": len(req.app_ids),
+        "sent": sent,
+        "failed": failed,
+        "dry_run": req.dry_run,
+        "results": results,
+    }
 
 
 # ---------------------------------------------------------------------------
